@@ -156,6 +156,13 @@ add_executable(semantickitti_node
   src/semantickitti_node.cpp
 )
 
+add_executable(mcd_node
+  ${MAPPING_SOURCE_FILES}
+  ${COMMON_SOURCE_FILES}
+  src/common/osm_visualizer.cpp
+  src/mcd_node.cpp
+)
+
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
 # add_dependencies(BGKOctoMap_node BGKOctoMap_generate_messages_cpp)
@@ -172,6 +179,11 @@ target_link_libraries(kitti_node
 )
 
 target_link_libraries(semantickitti_node
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+)
+
+target_link_libraries(mcd_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
 )
