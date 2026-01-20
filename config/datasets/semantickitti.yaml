@@ -20,3 +20,6 @@ gt_label_prefix: labels/
 evaluation_result_prefix: evaluations/
 query: true
 visualize: true
+
+# Color configuration
+colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
