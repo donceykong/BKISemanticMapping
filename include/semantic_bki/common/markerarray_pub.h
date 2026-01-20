@@ -1,3 +1,5 @@
+#pragma once
+
 #include <pcl_ros/point_cloud.h>
 #include <geometry_msgs/Point.h>
 #include <visualization_msgs/MarkerArray.h>
@@ -5,7 +7,11 @@
 #include <std_msgs/ColorRGBA.h>
 
 #include <cmath>
+#include <algorithm>
 #include <string>
+#include <map>
+#include <ros/param.h>
+#include <xmlrpcpp/XmlRpcValue.h>
 
 namespace semantic_bki {
 
@@ -437,6 +443,9 @@ namespace semantic_bki {
             int depth = 0;
             if (size > 0)
                 depth = (int) log2(size / 0.1);
+            
+            // Clamp depth to valid array bounds (0 to num_markers-1)
+            depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
 
             msg->markers[depth].points.push_back(center);
             if (min_z < max_z) {
@@ -449,6 +458,9 @@ namespace semantic_bki {
           int depth = 0;
           if (size > 0)
             depth = (int) log2(size / 0.1);
+          
+          // Clamp depth to valid array bounds (0 to num_markers-1)
+          depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
 
           msg->markers[depth].points.clear();
           msg->markers[depth].colors.clear();
@@ -463,18 +475,74 @@ namespace semantic_bki {
             int depth = 0;
             if (size > 0)
                 depth = (int) log2(size / 0.1);
+            
+            // Clamp depth to valid array bounds (0 to num_markers-1)
+            depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
 
             msg->markers[depth].points.push_back(center);
-            switch (dataset) {
-              case 1:
-                msg->markers[depth].colors.push_back(KITTISemanticMapColor(c));
-                break;
-              case 2:
-                msg->markers[depth].colors.push_back(SemanticKITTISemanticMapColor(c));
-                break;
-              default:
-                msg->markers[depth].colors.push_back(SemanticMapColor(c));
+            
+            // Use color map if loaded, otherwise fall back to hardcoded colors
+            std_msgs::ColorRGBA color;
+            if (!color_map_.empty() && color_map_.find(c) != color_map_.end()) {
+                color = color_map_[c];
+            } else {
+                // Fall back to hardcoded colors if color map not loaded
+                switch (dataset) {
+                  case 1:
+                    color = KITTISemanticMapColor(c);
+                    break;
+                  case 2:
+                    color = SemanticKITTISemanticMapColor(c);
+                    break;
+                  default:
+                    color = SemanticMapColor(c);
+                    break;
+                }
             }
+            msg->markers[depth].colors.push_back(color);
+        }
+        
+        // Load colors from ROS parameters (loaded from YAML file)
+        bool load_colors_from_params(ros::NodeHandle& nh) {
+            XmlRpc::XmlRpcValue colors_param;
+            if (!nh.getParam("colors", colors_param)) {
+                ROS_WARN_STREAM("No 'colors' parameter found in ROS parameter server. Using default hardcoded colors.");
+                return false;
+            }
+            
+            if (colors_param.getType() != XmlRpc::XmlRpcValue::TypeStruct) {
+                ROS_ERROR_STREAM("'colors' parameter must be a struct!");
+                return false;
+            }
+            
+            color_map_.clear();
+            for (XmlRpc::XmlRpcValue::iterator it = colors_param.begin(); it != colors_param.end(); ++it) {
+                std::string key_str = std::string(it->first);
+                int class_id = std::stoi(key_str);
+                XmlRpc::XmlRpcValue color_array = it->second;
+                
+                if (color_array.getType() == XmlRpc::XmlRpcValue::TypeArray && color_array.size() == 3) {
+                    std_msgs::ColorRGBA color;
+                    color.a = 1.0;
+                    // Convert from [0, 255] range to [0, 1] range
+                    if (color_array[0].getType() == XmlRpc::XmlRpcValue::TypeInt) {
+                        color.r = static_cast<int>(color_array[0]) / 255.0;
+                        color.g = static_cast<int>(color_array[1]) / 255.0;
+                        color.b = static_cast<int>(color_array[2]) / 255.0;
+                    } else if (color_array[0].getType() == XmlRpc::XmlRpcValue::TypeDouble) {
+                        color.r = static_cast<double>(color_array[0]) / 255.0;
+                        color.g = static_cast<double>(color_array[1]) / 255.0;
+                        color.b = static_cast<double>(color_array[2]) / 255.0;
+                    } else {
+                        ROS_WARN_STREAM("Invalid color type for class " << class_id);
+                        continue;
+                    }
+                    color_map_[class_id] = color;
+                }
+            }
+            
+            ROS_INFO_STREAM("Loaded " << color_map_.size() << " colors from ROS parameters.");
+            return !color_map_.empty();
         }
 
         void insert_point3d_variance(float x, float y, float z, float min_v, float max_v, float size, float var) {
@@ -486,6 +554,9 @@ namespace semantic_bki {
             int depth = 0;
             if (size > 0)
                     depth = (int) log2(size / 0.1);
+            
+            // Clamp depth to valid array bounds (0 to num_markers-1)
+            depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
 
             float middle = (max_v + min_v) / 2;
             var = (var - middle) / (middle - min_v);
@@ -536,6 +607,7 @@ namespace semantic_bki {
         std::string markerarray_frame_id;
         std::string topic;
         float resolution;
+        std::map<int, std_msgs::ColorRGBA> color_map_;  // Class ID to color mapping
     };
 
 }
