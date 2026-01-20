@@ -17,6 +17,9 @@
         <!-- Load dataset configuration from file -->
         <rosparam file="$(arg data_config)/$(arg dataset).yaml" command="load" />
         
+        <!-- Load colors file -->
+        <rosparam file="$(arg data_config)/$(arg dataset)_colors.yaml" command="load" />
+        
     </node>
 
 </launch>

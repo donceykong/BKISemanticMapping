@@ -117,6 +117,14 @@ class SemanticKITTIData {
       }
       m_pub_->publish();
     }
+    
+    // Load colors from ROS parameters
+    bool load_colors_from_params() {
+      if (m_pub_) {
+        return m_pub_->load_colors_from_params(nh_);
+      }
+      return false;
+    }
 
     void set_up_evaluation(const std::string gt_label_dir, const std::string evaluation_result_dir) {
       gt_label_dir_ = gt_label_dir;
