@@ -1,17 +1,19 @@
 #pragma once
 
-#include <pcl_ros/point_cloud.h>
-#include <geometry_msgs/Point.h>
-#include <visualization_msgs/MarkerArray.h>
-#include <visualization_msgs/Marker.h>
-#include <std_msgs/ColorRGBA.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <geometry_msgs/msg/point.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <cmath>
 #include <algorithm>
 #include <string>
 #include <map>
-#include <ros/param.h>
-#include <xmlrpcpp/XmlRpcValue.h>
+#include <fstream>
 
 namespace semantic_bki {
 
@@ -37,8 +39,8 @@ namespace semantic_bki {
         return base( gray + 0.5 );
     }
     
-    std_msgs::ColorRGBA JetMapColor(float gray) {
-      std_msgs::ColorRGBA color;
+    std_msgs::msg::ColorRGBA JetMapColor(float gray) {
+      std_msgs::msg::ColorRGBA color;
       color.a = 1.0;
 
       color.r = red(gray);
@@ -47,8 +49,8 @@ namespace semantic_bki {
       return color;
     }
 
-    std_msgs::ColorRGBA SemanticMapColor(int c) {
-      std_msgs::ColorRGBA color;
+    std_msgs::msg::ColorRGBA SemanticMapColor(int c) {
+      std_msgs::msg::ColorRGBA color;
       color.a = 1.0;
 
       switch (c) {
@@ -77,8 +79,8 @@ namespace semantic_bki {
       return color;
     }
 
-    std_msgs::ColorRGBA SemanticKITTISemanticMapColor(int c) {
-      std_msgs::ColorRGBA color;
+    std_msgs::msg::ColorRGBA SemanticKITTISemanticMapColor(int c) {
+      std_msgs::msg::ColorRGBA color;
       color.a = 1.0;
 
       switch (c) {
@@ -186,8 +188,8 @@ namespace semantic_bki {
       return color;
     }
 
-    std_msgs::ColorRGBA NCLTSemanticMapColor(int c) {
-      std_msgs::ColorRGBA color;
+    std_msgs::msg::ColorRGBA NCLTSemanticMapColor(int c) {
+      std_msgs::msg::ColorRGBA color;
       color.a = 1.0;
 
       switch (c) {
@@ -205,9 +207,6 @@ namespace semantic_bki {
           color.r = 128.0 / 255;
           color.g = 64.0 / 255;
           color.b = 128.0 / 255;
-          //color.r = 250.0/255;
-          //color.g = 250.0/255;
-          //color.b = 250.0/255;
           break;
         case 4:  // terrain
           color.r = 128.0 / 255;
@@ -233,9 +232,6 @@ namespace semantic_bki {
           color.r = 220.0 / 255;
           color.g = 20.0 / 255;
           color.b = 60.0 / 255;
-          //color.r = 250.0 / 255;
-          //color.g = 250.0 / 255;
-          //color.b = 250.0 / 255;
           break;
         case 9:  // bike
           color.r = 119.0 / 255;
@@ -271,8 +267,8 @@ namespace semantic_bki {
       return color;
     }
 
-    std_msgs::ColorRGBA KITTISemanticMapColor(int c) {
-      std_msgs::ColorRGBA color;
+    std_msgs::msg::ColorRGBA KITTISemanticMapColor(int c) {
+      std_msgs::msg::ColorRGBA color;
       color.a = 1.0;
       
       switch (c) {
@@ -342,9 +338,9 @@ namespace semantic_bki {
     }
 
 
-    std_msgs::ColorRGBA heightMapColor(double h) {
+    std_msgs::msg::ColorRGBA heightMapColor(double h) {
 
-        std_msgs::ColorRGBA color;
+        std_msgs::msg::ColorRGBA color;
         color.a = 1.0;
         // blend over HSV-values (more colors)
 
@@ -409,33 +405,34 @@ namespace semantic_bki {
         typedef pcl::PointXYZ PointType;
         typedef pcl::PointCloud<PointType> PointCloud;
     public:
-        MarkerArrayPub(ros::NodeHandle nh, std::string topic, float resolution) : nh(nh),
-                                                                                  msg(new visualization_msgs::MarkerArray),
-                                                                                  topic(topic),
-                                                                                  resolution(resolution),
-                                                                                  markerarray_frame_id("map") {
-            pub = nh.advertise<visualization_msgs::MarkerArray>(topic, 1, true);
+        MarkerArrayPub(rclcpp::Node::SharedPtr node, std::string topic, float resolution) 
+            : node_(node),
+              markerarray_frame_id_("map"),
+              topic_(topic),
+              resolution_(resolution) {
+            pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(topic_, rclcpp::QoS(1).transient_local());
 
-            msg->markers.resize(2);
+            msg_ = std::make_shared<visualization_msgs::msg::MarkerArray>();
+            msg_->markers.resize(2);
             for (int i = 0; i < 2; ++i) {
-                msg->markers[i].header.frame_id = markerarray_frame_id;
-                msg->markers[i].ns = "map";
-                msg->markers[i].id = i;
-                msg->markers[i].type = visualization_msgs::Marker::CUBE_LIST;
-                msg->markers[i].scale.x = resolution * pow(2, i);
-                msg->markers[i].scale.y = resolution * pow(2, i);
-                msg->markers[i].scale.z = resolution * pow(2, i);
-                std_msgs::ColorRGBA color;
+                msg_->markers[i].header.frame_id = markerarray_frame_id_;
+                msg_->markers[i].ns = "map";
+                msg_->markers[i].id = i;
+                msg_->markers[i].type = visualization_msgs::msg::Marker::CUBE_LIST;
+                msg_->markers[i].scale.x = resolution * pow(2, i);
+                msg_->markers[i].scale.y = resolution * pow(2, i);
+                msg_->markers[i].scale.z = resolution * pow(2, i);
+                std_msgs::msg::ColorRGBA color;
                 color.r = 0.0;
                 color.g = 0.0;
                 color.b = 1.0;
                 color.a = 1.0;
-                msg->markers[i].color = color;
+                msg_->markers[i].color = color;
             }
         }
 
         void insert_point3d(float x, float y, float z, float min_z, float max_z, float size) {
-            geometry_msgs::Point center;
+            geometry_msgs::msg::Point center;
             center.x = x;
             center.y = y;
             center.z = z;
@@ -445,12 +442,12 @@ namespace semantic_bki {
                 depth = (int) log2(size / 0.1);
             
             // Clamp depth to valid array bounds (0 to num_markers-1)
-            depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
+            depth = std::max(0, std::min(depth, (int)msg_->markers.size() - 1));
 
-            msg->markers[depth].points.push_back(center);
+            msg_->markers[depth].points.push_back(center);
             if (min_z < max_z) {
                 double h = (1.0 - std::min(std::max((z - min_z) / (max_z - min_z), 0.0f), 1.0f)) * 0.8;
-                msg->markers[depth].colors.push_back(heightMapColor(h));
+                msg_->markers[depth].colors.push_back(heightMapColor(h));
             }
         }
 
@@ -460,14 +457,14 @@ namespace semantic_bki {
             depth = (int) log2(size / 0.1);
           
           // Clamp depth to valid array bounds (0 to num_markers-1)
-          depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
+          depth = std::max(0, std::min(depth, (int)msg_->markers.size() - 1));
 
-          msg->markers[depth].points.clear();
-          msg->markers[depth].colors.clear();
+          msg_->markers[depth].points.clear();
+          msg_->markers[depth].colors.clear();
         }
 
         void insert_point3d_semantics(float x, float y, float z, float size, int c, int dataset) {
-            geometry_msgs::Point center;
+            geometry_msgs::msg::Point center;
             center.x = x;
             center.y = y;
             center.z = z;
@@ -477,12 +474,12 @@ namespace semantic_bki {
                 depth = (int) log2(size / 0.1);
             
             // Clamp depth to valid array bounds (0 to num_markers-1)
-            depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
+            depth = std::max(0, std::min(depth, (int)msg_->markers.size() - 1));
 
-            msg->markers[depth].points.push_back(center);
+            msg_->markers[depth].points.push_back(center);
             
             // Use color map if loaded, otherwise fall back to hardcoded colors
-            std_msgs::ColorRGBA color;
+            std_msgs::msg::ColorRGBA color;
             if (!color_map_.empty() && color_map_.find(c) != color_map_.end()) {
                 color = color_map_[c];
             } else {
@@ -499,54 +496,102 @@ namespace semantic_bki {
                     break;
                 }
             }
-            msg->markers[depth].colors.push_back(color);
+            msg_->markers[depth].colors.push_back(color);
         }
         
-        // Load colors from ROS parameters (loaded from YAML file)
-        bool load_colors_from_params(ros::NodeHandle& nh) {
-            XmlRpc::XmlRpcValue colors_param;
-            if (!nh.getParam("colors", colors_param)) {
-                ROS_WARN_STREAM("No 'colors' parameter found in ROS parameter server. Using default hardcoded colors.");
-                return false;
-            }
-            
-            if (colors_param.getType() != XmlRpc::XmlRpcValue::TypeStruct) {
-                ROS_ERROR_STREAM("'colors' parameter must be a struct!");
-                return false;
-            }
-            
-            color_map_.clear();
-            for (XmlRpc::XmlRpcValue::iterator it = colors_param.begin(); it != colors_param.end(); ++it) {
-                std::string key_str = std::string(it->first);
-                int class_id = std::stoi(key_str);
-                XmlRpc::XmlRpcValue color_array = it->second;
+        // Load colors from YAML file
+        bool load_colors_from_params(rclcpp::Node::SharedPtr node) {
+            try {
+                // Try to get colors parameter from node
+                if (!node->has_parameter("colors")) {
+                    RCLCPP_WARN_STREAM(node->get_logger(), "No 'colors' parameter found. Using default hardcoded colors.");
+                    return false;
+                }
                 
-                if (color_array.getType() == XmlRpc::XmlRpcValue::TypeArray && color_array.size() == 3) {
-                    std_msgs::ColorRGBA color;
-                    color.a = 1.0;
-                    // Convert from [0, 255] range to [0, 1] range
-                    if (color_array[0].getType() == XmlRpc::XmlRpcValue::TypeInt) {
-                        color.r = static_cast<int>(color_array[0]) / 255.0;
-                        color.g = static_cast<int>(color_array[1]) / 255.0;
-                        color.b = static_cast<int>(color_array[2]) / 255.0;
-                    } else if (color_array[0].getType() == XmlRpc::XmlRpcValue::TypeDouble) {
-                        color.r = static_cast<double>(color_array[0]) / 255.0;
-                        color.g = static_cast<double>(color_array[1]) / 255.0;
-                        color.b = static_cast<double>(color_array[2]) / 255.0;
-                    } else {
-                        ROS_WARN_STREAM("Invalid color type for class " << class_id);
+                rclcpp::Parameter colors_param = node->get_parameter("colors");
+                if (colors_param.get_type() != rclcpp::ParameterType::PARAMETER_NOT_SET) {
+                    // Parameter exists but may not be a dictionary
+                    // For YAML files, we'll read them directly
+                    RCLCPP_WARN_STREAM(node->get_logger(), "Colors parameter found but YAML reading not fully implemented. Using default colors.");
+                    return false;
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_WARN_STREAM(node->get_logger(), "Error reading colors parameter: " << e.what() << ". Using default hardcoded colors.");
+            }
+            
+            return false;
+        }
+        
+        // Load colors from YAML file path
+        bool load_colors_from_yaml(const std::string& yaml_file_path) {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MarkerArrayPub::load_colors_from_yaml: Starting, file=" << yaml_file_path);
+            if (!node_) {
+                RCLCPP_WARN_STREAM(rclcpp::get_logger("markerarray_pub"), "WARNING: node_ is null in load_colors_from_yaml!");
+                return false;  // Safety check: node_ must be valid
+            }
+            RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: node_ is valid, loading YAML file");
+            
+            try {
+                YAML::Node yaml_node = YAML::LoadFile(yaml_file_path);
+                RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: YAML file loaded successfully");
+                
+                // Navigate through ROS2 parameter format: /**: ros__parameters: colors:
+                YAML::Node colors_node;
+                if (yaml_node["/**"] && yaml_node["/**"]["ros__parameters"] && yaml_node["/**"]["ros__parameters"]["colors"]) {
+                    colors_node = yaml_node["/**"]["ros__parameters"]["colors"];
+                } else if (yaml_node["colors"]) {
+                    // Fallback: try direct access (for non-ROS2 format)
+                    colors_node = yaml_node["colors"];
+                } else {
+                    RCLCPP_WARN_STREAM(node_->get_logger(), "No 'colors' key found in YAML file: " << yaml_file_path);
+                    return false;
+                }
+                
+                if (!colors_node.IsMap()) {
+                    RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Colors node is not a map in YAML file: " << yaml_file_path);
+                    return false;
+                }
+                RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Colors node is a map, starting to parse entries");
+                
+                color_map_.clear();
+                int entry_count = 0;
+                for (const auto& entry : colors_node) {
+                    entry_count++;
+                    try {
+                        std::string key_str = entry.first.as<std::string>();
+                        int class_id = std::stoi(key_str);
+                        
+                        if (entry.second.IsSequence() && entry.second.size() == 3) {
+                            std_msgs::msg::ColorRGBA color;
+                            color.a = 1.0;
+                            // Convert from [0, 255] range to [0, 1] range
+                            color.r = entry.second[0].as<double>() / 255.0;
+                            color.g = entry.second[1].as<double>() / 255.0;
+                            color.b = entry.second[2].as<double>() / 255.0;
+                            color_map_[class_id] = color;
+                        }
+                    } catch (const std::exception& e) {
+                        RCLCPP_WARN_STREAM(node_->get_logger(), "Error parsing color entry: " << e.what() << ", skipping");
                         continue;
                     }
-                    color_map_[class_id] = color;
                 }
+                
+                bool success = !color_map_.empty();
+                return success;
+            } catch (const YAML::Exception& e) {
+                RCLCPP_WARN_STREAM(node_->get_logger(), "YAML error loading colors from file " << yaml_file_path << ": " << e.what());
+                return false;
+            } catch (const std::exception& e) {
+                RCLCPP_WARN_STREAM(node_->get_logger(), "Error loading colors from YAML file " << yaml_file_path << ": " << e.what());
+                return false;
+            } catch (...) {
+                RCLCPP_WARN_STREAM(node_->get_logger(), "Unknown error loading colors from YAML file " << yaml_file_path);
+                return false;
             }
-            
-            ROS_INFO_STREAM("Loaded " << color_map_.size() << " colors from ROS parameters.");
-            return !color_map_.empty();
         }
 
         void insert_point3d_variance(float x, float y, float z, float min_v, float max_v, float size, float var) {
-            geometry_msgs::Point center;
+            geometry_msgs::msg::Point center;
             center.x = x;
             center.y = y;
             center.z = z;
@@ -556,14 +601,12 @@ namespace semantic_bki {
                     depth = (int) log2(size / 0.1);
             
             // Clamp depth to valid array bounds (0 to num_markers-1)
-            depth = std::max(0, std::min(depth, (int)msg->markers.size() - 1));
+            depth = std::max(0, std::min(depth, (int)msg_->markers.size() - 1));
 
             float middle = (max_v + min_v) / 2;
             var = (var - middle) / (middle - min_v);
-            //std::cout << var << std::endl; 
-            msg->markers[depth].points.push_back(center);
-            msg->markers[depth].colors.push_back(JetMapColor(var));
-
+            msg_->markers[depth].points.push_back(center);
+            msg_->markers[depth].colors.push_back(JetMapColor(var));
         }
 
         void insert_point3d(float x, float y, float z, float min_z, float max_z) {
@@ -575,39 +618,48 @@ namespace semantic_bki {
         }
 
         void insert_color_point3d(float x, float y, float z, double min_v, double max_v, double v) {
-            geometry_msgs::Point center;
+            geometry_msgs::msg::Point center;
             center.x = x;
             center.y = y;
             center.z = z;
 
             int depth = 0;
-            msg->markers[depth].points.push_back(center);
+            msg_->markers[depth].points.push_back(center);
 
             double h = (1.0 - std::min(std::max((v - min_v) / (max_v - min_v), 0.0), 1.0)) * 0.8;
-            msg->markers[depth].colors.push_back(heightMapColor(h));
+            msg_->markers[depth].colors.push_back(heightMapColor(h));
         }
 
         void clear() {
-            for (int i = 0; i < 10; ++i) {
-                msg->markers[i].points.clear();
-                msg->markers[i].colors.clear();
+            for (size_t i = 0; i < msg_->markers.size(); ++i) {
+                msg_->markers[i].points.clear();
+                msg_->markers[i].colors.clear();
             }
         }
 
         void publish() const {
-            msg->markers[0].header.stamp = ros::Time::now();
-            pub.publish(*msg);
-            ros::spinOnce();
+            if (!msg_ || !pub_) {
+                return;  // Safety check
+            }
+            if (msg_->markers.empty()) {
+                return;  // No markers to publish
+            }
+            try {
+                msg_->markers[0].header.stamp = node_->now();
+                pub_->publish(*msg_);  // ROS2 publish accepts const reference
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR_STREAM(node_->get_logger(), "Exception in MarkerArrayPub::publish(): " << e.what());
+            }
         }
 
     private:
-        ros::NodeHandle nh;
-        ros::Publisher pub;
-        visualization_msgs::MarkerArray::Ptr msg;
-        std::string markerarray_frame_id;
-        std::string topic;
-        float resolution;
-        std::map<int, std_msgs::ColorRGBA> color_map_;  // Class ID to color mapping
+        rclcpp::Node::SharedPtr node_;
+        rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_;
+        visualization_msgs::msg::MarkerArray::SharedPtr msg_;
+        std::string markerarray_frame_id_;
+        std::string topic_;
+        float resolution_;
+        std::map<int, std_msgs::msg::ColorRGBA> color_map_;  // Class ID to color mapping
     };
 
 }

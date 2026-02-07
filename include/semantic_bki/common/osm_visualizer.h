@@ -1,12 +1,13 @@
 #pragma once
 
-#include <ros/ros.h>
-#include <visualization_msgs/MarkerArray.h>
-#include <visualization_msgs/Marker.h>
-#include <std_msgs/ColorRGBA.h>
+#include <rclcpp/rclcpp.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
 #include <fstream>
 #include <vector>
 #include <string>
+#include <memory>
 #include <Eigen/Dense>
 
 namespace semantic_bki {
@@ -17,7 +18,7 @@ namespace semantic_bki {
 
     class OSMVisualizer {
     public:
-        OSMVisualizer(ros::NodeHandle nh, const std::string& topic);
+        OSMVisualizer(rclcpp::Node::SharedPtr node, const std::string& topic);
         ~OSMVisualizer() = default;
 
         /**
@@ -49,32 +50,44 @@ namespace semantic_bki {
         /**
          * Timer callback for periodic publishing.
          */
-        void timerCallback(const ros::TimerEvent& event);
+        void timerCallback();
 
         /**
          * Create Marker message for buildings (blue lines).
          */
-        visualization_msgs::Marker createBuildingMarker(const std::vector<Geometry2D>& buildings);
+        visualization_msgs::msg::Marker createBuildingMarker(const std::vector<Geometry2D>& buildings);
 
         /**
          * Create Marker message for roads (red lines).
          */
-        visualization_msgs::Marker createRoadMarker(const std::vector<Geometry2D>& roads);
+        visualization_msgs::msg::Marker createRoadMarker(const std::vector<Geometry2D>& roads);
 
         /**
          * Create Marker message for grasslands (green filled polygons).
          */
-        visualization_msgs::Marker createGrasslandMarker(const std::vector<Geometry2D>& grasslands);
+        visualization_msgs::msg::Marker createGrasslandMarker(const std::vector<Geometry2D>& grasslands);
 
-        ros::NodeHandle nh_;
-        ros::Publisher pub_;
-        ros::Timer publish_timer_;
+        /**
+         * Create Marker message for trees (green markers/polygons).
+         */
+        visualization_msgs::msg::Marker createTreeMarker(const std::vector<Geometry2D>& trees);
+
+        /**
+         * Create Marker message for wood/forests (dark green filled polygons).
+         */
+        visualization_msgs::msg::Marker createWoodMarker(const std::vector<Geometry2D>& wood);
+
+        rclcpp::Node::SharedPtr node_;
+        rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_;
+        rclcpp::TimerBase::SharedPtr publish_timer_;
         std::string topic_;
         std::string frame_id_;
 
         std::vector<Geometry2D> buildings_;
         std::vector<Geometry2D> roads_;
         std::vector<Geometry2D> grasslands_;
+        std::vector<Geometry2D> trees_;
+        std::vector<Geometry2D> wood_;
     };
 
 } // namespace semantic_bki

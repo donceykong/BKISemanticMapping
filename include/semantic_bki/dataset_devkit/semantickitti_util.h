@@ -1,18 +1,16 @@
 #pragma once
 
 #include <fstream>
+#include <memory>
 
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud.h>
-#include <tf/transform_listener.h>
-#include <tf_conversions/tf_eigen.h>
+#include <rclcpp/rclcpp.hpp>
 
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
 
 class SemanticKITTIData {
   public:
-    SemanticKITTIData(ros::NodeHandle& nh,
+    SemanticKITTIData(rclcpp::Node::SharedPtr node,
              double resolution, double block_depth,
              double sf2, double ell,
              int num_class, double free_thresh,
@@ -21,13 +19,13 @@ class SemanticKITTIData {
              double free_resolution, double max_range,
              std::string map_topic,
              float prior)
-      : nh_(nh)
+      : node_(node)
       , resolution_(resolution)
       , ds_resolution_(ds_resolution)
       , free_resolution_(free_resolution)
       , max_range_(max_range) {
         map_ = new semantic_bki::SemanticBKIOctoMap(resolution, block_depth, num_class, sf2, ell, prior, var_thresh, free_thresh, occupied_thresh);
-        m_pub_ = new semantic_bki::MarkerArrayPub(nh_, map_topic, resolution);
+        m_pub_ = new semantic_bki::MarkerArrayPub(node_, map_topic, resolution);
       	init_trans_to_ground_ << 1, 0, 0, 0,
                                  0, 0, 1, 0,
                                  0,-1, 0, 1,
@@ -54,7 +52,7 @@ class SemanticKITTIData {
         fPoses.close();
         return true;
         } else {
-         ROS_ERROR_STREAM("Cannot open evaluation list file " << lidar_pose_name);
+         RCLCPP_ERROR_STREAM(node_->get_logger(), "Cannot open evaluation list file " << lidar_pose_name);
          return false;
       }
     } 
@@ -121,7 +119,7 @@ class SemanticKITTIData {
     // Load colors from ROS parameters
     bool load_colors_from_params() {
       if (m_pub_) {
-        return m_pub_->load_colors_from_params(nh_);
+        return m_pub_->load_colors_from_params(node_);
       }
       return false;
     }
@@ -176,15 +174,13 @@ class SemanticKITTIData {
 
   
   private:
-    ros::NodeHandle nh_;
+    rclcpp::Node::SharedPtr node_;
     double resolution_;
     double ds_resolution_;
     double free_resolution_;
     double max_range_;
     semantic_bki::SemanticBKIOctoMap* map_;
     semantic_bki::MarkerArrayPub* m_pub_;
-    ros::Publisher color_octomap_publisher_;
-    tf::TransformListener listener_;
     std::ofstream pose_file_;
     std::vector<Eigen::Matrix4d> lidar_poses_;
     std::string gt_label_dir_;

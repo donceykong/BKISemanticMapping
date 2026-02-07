@@ -4,17 +4,21 @@
 #include <sstream>
 #include <vector>
 #include <string>
+#include <memory>
+#include <thread>
+#include <chrono>
+#include <cstdlib>
 
-#include <ros/ros.h>
-#include <ros/param.h>
-#include <xmlrpcpp/XmlRpcValue.h>
-#include <sensor_msgs/PointCloud.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <tf/transform_listener.h>
-#include <tf/transform_broadcaster.h>
-#include <tf_conversions/tf_eigen.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <yaml-cpp/yaml.h>
 
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
@@ -25,7 +29,7 @@
 
 class MCDData {
   public:
-    MCDData(ros::NodeHandle& nh,
+    MCDData(rclcpp::Node::SharedPtr node,
              double resolution, double block_depth,
              double sf2, double ell,
              int num_class, double free_thresh,
@@ -34,15 +38,42 @@ class MCDData {
              double free_resolution, double max_range,
              std::string map_topic,
              float prior)
-      : nh_(nh)
+      : node_(node)
       , resolution_(resolution)
       , ds_resolution_(ds_resolution)
       , free_resolution_(free_resolution)
-      , max_range_(max_range) {
+      , max_range_(max_range)
+      , tf_broadcaster_(node)
+      , tf_buffer_(std::make_shared<tf2_ros::Buffer>(node->get_clock()))
+      , tf_listener_(*tf_buffer_) {
+        if (!node_) {
+          RCLCPP_WARN_STREAM(rclcpp::get_logger("mcd_util"), "WARNING: MCDData constructor: node_ is null!");
+        }
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MCDData constructor: Creating octomap");
         map_ = new semantic_bki::SemanticBKIOctoMap(resolution, block_depth, num_class, sf2, ell, prior, var_thresh, free_thresh, occupied_thresh);
-        m_pub_ = new semantic_bki::MarkerArrayPub(nh_, map_topic, resolution);
+        if (!map_) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Failed to create SemanticBKIOctoMap!");
+        } else {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Octomap created successfully");
+        }
+        
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Creating MarkerArrayPub");
+        m_pub_ = new semantic_bki::MarkerArrayPub(node_, map_topic, resolution);
+        if (!m_pub_) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Failed to create MarkerArrayPub!");
+        } else {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MarkerArrayPub created successfully");
+        }
+        
         // Publisher for individual scan point clouds
-        pointcloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/mcd_scan_pointcloud", 1);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Creating pointcloud publisher");
+        pointcloud_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/mcd_scan_pointcloud", 10);
+        if (!pointcloud_pub_) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Failed to create pointcloud publisher!");
+        } else {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Pointcloud publisher created successfully");
+        }
+        
         // Identity transformation for MCD (poses are already in world frame)
         init_trans_to_ground_ = Eigen::Matrix4d::Identity();
         // Body to LiDAR transformation (must be loaded from calibration - no default identity)
@@ -50,15 +81,19 @@ class MCDData {
         body_to_lidar_tf_ = Eigen::Matrix4d::Zero();  // Set to zero to detect if not loaded
         original_first_pose_ = Eigen::Matrix4d::Identity();  // Will be set when poses are loaded
         scan_indices_.clear();  // Initialize scan indices vector
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MCDData constructor completed");
       }
 
     bool read_lidar_poses(const std::string lidar_pose_name) {
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: read_lidar_poses: Opening file: " << lidar_pose_name);
       std::ifstream fPoses;
       fPoses.open(lidar_pose_name.c_str());
       if (!fPoses.is_open()) {
-        ROS_ERROR_STREAM("Cannot open pose file " << lidar_pose_name);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Cannot open pose file " << lidar_pose_name);
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "Cannot open pose file " << lidar_pose_name);
         return false;
       }
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Pose file opened successfully");
       
       // Skip header line if present
       std::string header_line;
@@ -138,9 +173,11 @@ class MCDData {
       }
       
       fPoses.close();
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Finished reading pose file, loaded " << lidar_poses_.size() << " poses");
       
       if (lidar_poses_.empty()) {
-        ROS_ERROR_STREAM("No poses loaded from " << lidar_pose_name);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: No poses loaded from " << lidar_pose_name);
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "No poses loaded from " << lidar_pose_name);
         return false;
       }
       
@@ -151,8 +188,8 @@ class MCDData {
       // This means: transform all poses by the inverse of the first pose
       Eigen::Matrix4d first_pose_inverse = lidar_poses_[0].inverse();
       
-      ROS_INFO_STREAM("First pose before alignment:");
-      ROS_INFO_STREAM("  Translation: [" << lidar_poses_[0](0,3) << ", " << lidar_poses_[0](1,3) << ", " << lidar_poses_[0](2,3) << "]");
+      RCLCPP_INFO_STREAM(node_->get_logger(), "First pose before alignment:");
+      RCLCPP_INFO_STREAM(node_->get_logger(), "  Translation: [" << lidar_poses_[0](0,3) << ", " << lidar_poses_[0](1,3) << ", " << lidar_poses_[0](2,3) << "]");
       
       // Transform all poses to be relative to the first pose
       for (size_t i = 0; i < lidar_poses_.size(); ++i) {
@@ -160,9 +197,9 @@ class MCDData {
       }
       
       // Verify first pose is now at origin
-      ROS_INFO_STREAM("After alignment - First pose should be identity:");
-      ROS_INFO_STREAM("  Translation: [" << lidar_poses_[0](0,3) << ", " << lidar_poses_[0](1,3) << ", " << lidar_poses_[0](2,3) << "]");
-      ROS_INFO_STREAM("Loaded " << lidar_poses_.size() << " poses from " << lidar_pose_name << " (all relative to first pose)");
+      RCLCPP_INFO_STREAM(node_->get_logger(), "After alignment - First pose should be identity:");
+      RCLCPP_INFO_STREAM(node_->get_logger(), "  Translation: [" << lidar_poses_[0](0,3) << ", " << lidar_poses_[0](1,3) << ", " << lidar_poses_[0](2,3) << "]");
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << lidar_poses_.size() << " poses from " << lidar_pose_name << " (all relative to first pose)");
       
       return true;
     }
@@ -174,6 +211,19 @@ class MCDData {
     } 
 
     bool process_scans(std::string input_data_dir, std::string input_label_dir, int scan_num, int skip_frames, bool query, bool visualize) {
+      if (!map_) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: process_scans: map_ is null!");
+        return false;
+      }
+      if (!m_pub_) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: process_scans: m_pub_ is null!");
+        return false;
+      }
+      if (lidar_poses_.empty()) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: process_scans: No poses loaded!");
+        return false;
+      }
+      
       semantic_bki::point3f origin;
       
       // Only process scans that have corresponding poses
@@ -200,17 +250,21 @@ class MCDData {
         std::string label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
         
         pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, label_name);
-        if (cloud->points.empty()) {
-          ROS_WARN_STREAM("Empty point cloud at scan file " << scan_file_num << " (pose index " << pose_idx << "), skipping");
+        if (!cloud) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: mcd2pcl returned null pointer for scan " << scan_file_num);
           continue;
         }
-
+        if (cloud->points.empty()) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Empty point cloud at scan file " << scan_file_num << " (pose index " << pose_idx << "), skipping");
+          continue;
+        }
+  
         Eigen::Matrix4d transform = lidar_poses_[pose_idx];  // This is body_to_world from pose
         
         // Verify body-to-lidar transform is loaded (should not be zero matrix)
         if (body_to_lidar_tf_.isZero(1e-10)) {
-          ROS_FATAL_STREAM("ERROR: body_to_lidar_tf_ is not initialized! Calibration must be loaded before processing scans.");
-          ROS_FATAL_STREAM("Call load_calibration_from_params() and ensure it returns true.");
+          RCLCPP_FATAL_STREAM(node_->get_logger(), "ERROR: body_to_lidar_tf_ is not initialized! Calibration must be loaded before processing scans.");
+          RCLCPP_FATAL_STREAM(node_->get_logger(), "Call load_calibration_from_params() and ensure it returns true.");
           exit(1);
         }
         
@@ -222,52 +276,47 @@ class MCDData {
         Eigen::Matrix4d lidar_to_map = transform * lidar_to_body;  // T_lidar_to_map = body_to_world * lidar_to_body
         
         // Publish TF transform from 'map' to 'lidar' frame
-        // In ROS TF: when publishing parent->child, TF will transform points FROM child TO parent
-        // So when we publish "map"->"lidar", TF will use it as: point_in_map = T_map_to_lidar * point_in_lidar
-        // We have lidar_to_map which transforms points FROM lidar TO map: point_in_map = lidar_to_map * point_in_lidar
-        // Therefore: T_map_to_lidar = lidar_to_map (use lidar_to_map directly, not its inverse!)
-        // NOTE: This is correct because lidar_to_map already represents "where is lidar in map frame"
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = node_->now();
+        t.header.frame_id = "map";
+        t.child_frame_id = "lidar";
         
-        // Extract rotation and translation for TF from lidar_to_map (not its inverse)
-        tf::Transform tf_transform;
         Eigen::Matrix3d rotation = lidar_to_map.block<3, 3>(0, 0);
         Eigen::Vector3d translation = lidar_to_map.block<3, 1>(0, 3);
         
-        tf::Matrix3x3 tf_rotation(
-          rotation(0, 0), rotation(0, 1), rotation(0, 2),
-          rotation(1, 0), rotation(1, 1), rotation(1, 2),
-          rotation(2, 0), rotation(2, 1), rotation(2, 2)
-        );
-        tf::Vector3 tf_translation(translation(0), translation(1), translation(2));
+        Eigen::Quaterniond quat(rotation);
+        t.transform.translation.x = translation(0);
+        t.transform.translation.y = translation(1);
+        t.transform.translation.z = translation(2);
+        t.transform.rotation.x = quat.x();
+        t.transform.rotation.y = quat.y();
+        t.transform.rotation.z = quat.z();
+        t.transform.rotation.w = quat.w();
         
-        tf_transform.setBasis(tf_rotation);
-        tf_transform.setOrigin(tf_translation);
-        
-        ros::Time current_time = ros::Time::now();
-        tf_broadcaster_.sendTransform(tf::StampedTransform(tf_transform, current_time, "map", "lidar"));
+        tf_broadcaster_.sendTransform(t);
         
         // Debug: Print transform info for first few scans
         if (pose_idx < 3) {
-          ROS_INFO_STREAM("Scan " << pose_idx << " Transform info:");
-          ROS_INFO_STREAM("  Body-to-world translation from CSV: [" << transform(0,3) << ", " << transform(1,3) << ", " << transform(2,3) << "]");
-          ROS_INFO_STREAM("  Lidar-to-map translation: [" << lidar_to_map(0,3) << ", " << lidar_to_map(1,3) << ", " << lidar_to_map(2,3) << "]");
-          ROS_INFO_STREAM("  TF translation (from lidar_to_map): [" << translation(0) << ", " << translation(1) << ", " << translation(2) << "]");
+          RCLCPP_INFO_STREAM(node_->get_logger(), "Scan " << pose_idx << " Transform info:");
+          RCLCPP_INFO_STREAM(node_->get_logger(), "  Body-to-world translation from CSV: [" << transform(0,3) << ", " << transform(1,3) << ", " << transform(2,3) << "]");
+          RCLCPP_INFO_STREAM(node_->get_logger(), "  Lidar-to-map translation: [" << lidar_to_map(0,3) << ", " << lidar_to_map(1,3) << ", " << lidar_to_map(2,3) << "]");
+          RCLCPP_INFO_STREAM(node_->get_logger(), "  TF translation (from lidar_to_map): [" << translation(0) << ", " << translation(1) << ", " << translation(2) << "]");
           
           // Verify: transform origin from lidar frame should give lidar_to_map translation
           Eigen::Vector4d lidar_origin(0, 0, 0, 1);
           Eigen::Vector4d map_origin_test = lidar_to_map * lidar_origin;
-          ROS_INFO_STREAM("  Verification - lidar origin in map coords: [" << map_origin_test(0) << ", " << map_origin_test(1) << ", " << map_origin_test(2) << "]");
+          RCLCPP_INFO_STREAM(node_->get_logger(), "  Verification - lidar origin in map coords: [" << map_origin_test(0) << ", " << map_origin_test(1) << ", " << map_origin_test(2) << "]");
         }
         
         // Publish individual scan as PointCloud2 (in lidar frame, before transformation)
-        sensor_msgs::PointCloud2 cloud_msg;
+        sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud, cloud_msg);
         cloud_msg.header.frame_id = "lidar";
-        cloud_msg.header.stamp = current_time;
-        pointcloud_pub_.publish(cloud_msg);
+        cloud_msg.header.stamp = node_->now();
+        pointcloud_pub_->publish(cloud_msg);
         
         if (pose_idx == 0) {
-          ROS_INFO_STREAM("Published PointCloud2 with " << cloud->points.size() << " points in frame 'lidar'");
+          RCLCPP_INFO_STREAM(node_->get_logger(), "Published PointCloud2 with " << cloud->points.size() << " points in frame 'lidar'");
         }
         
         // Now transform cloud to world frame for map insertion
@@ -277,12 +326,23 @@ class MCDData {
         origin.y() = transform(1, 3);
         origin.z() = transform(2, 3);
         
-        map_->insert_pointcloud(*cloud, origin, ds_resolution_, free_resolution_, max_range_);
+        try {
+          map_->insert_pointcloud(*cloud, origin, ds_resolution_, free_resolution_, max_range_);
+        } catch (const std::exception& e) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Exception during insert_pointcloud: " << e.what());
+          continue;
+        }
         insertion_count++;
-        ROS_INFO_STREAM("Inserted point cloud " << scan_file_num << " (pose index " << pose_idx << ") from " << scan_name << " (" << cloud->points.size() << " points) - insertion #" << insertion_count);
+        
+        // Skip query/visualize for first insertion to avoid potential segfaults with empty/initializing octree
+        if (insertion_count == 1) {
+          RCLCPP_DEBUG_STREAM(node_->get_logger(), "Skipping query/visualize for first insertion");
+          continue;
+        }
         
         if (query) {
           // Query previous scans (use pose indices, not file numbers)
+          // Original ROS1 logic: for (int query_pose_idx = pose_idx - 10; query_pose_idx >= 0 && query_pose_idx <= pose_idx; ++query_pose_idx)
           for (int query_pose_idx = pose_idx - 10; query_pose_idx >= 0 && query_pose_idx <= pose_idx; ++query_pose_idx) {
             query_scan(input_data_dir, input_label_dir, query_pose_idx);
           }
@@ -291,13 +351,13 @@ class MCDData {
         if (visualize) {
           publish_map();
           // Small delay to allow rviz to process the visualization
-          ros::Duration(0.1).sleep();
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
       }
       
       // Final publish after all scans are processed
       if (visualize) {
-        ROS_INFO_STREAM("All scans processed. Publishing final map visualization...");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "All scans processed. Publishing final map visualization...");
         publish_map();
       }
       
@@ -305,25 +365,96 @@ class MCDData {
     }
 
     void publish_map() {
+      if (!m_pub_) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: publish_map: m_pub_ is null!");
+        return;
+      }
+      if (!map_) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: publish_map: map_ is null!");
+        return;
+      }
+
       m_pub_->clear_map(resolution_);
-      int voxel_count = 0;
-      for (auto it = map_->begin_leaf(); it != map_->end_leaf(); ++it) {
-        if (it.get_node().get_state() == semantic_bki::State::OCCUPIED) {
-          semantic_bki::point3f p = it.get_loc();
-          m_pub_->insert_point3d_semantics(p.x(), p.y(), p.z(), it.get_size(), it.get_node().get_semantics(), 2);
-          voxel_count++;
+      
+      // Check if map is empty before iterating - get iterators separately to catch segfault location
+      try {
+        auto begin_it = map_->begin_leaf();
+        
+        auto end_it = map_->end_leaf();
+        
+        if (begin_it == end_it) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Map is empty (begin == end), nothing to publish");
+          m_pub_->publish();
+          return;
         }
+      } catch (const std::exception& e) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Exception getting iterators: " << e.what());
+        return;
+      } catch (...) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Unknown exception getting iterators");
+        return;
+      }
+      
+      int voxel_count = 0;
+      int iter_count = 0;
+      try {
+        auto loop_begin = map_->begin_leaf();
+        auto loop_end = map_->end_leaf();
+        
+        auto it = loop_begin;
+        
+        while (it != loop_end) {
+          iter_count++;
+          
+          try {
+            auto node = it.get_node();
+            
+            if (node.get_state() == semantic_bki::State::OCCUPIED) {
+              semantic_bki::point3f p = it.get_loc();
+              m_pub_->insert_point3d_semantics(p.x(), p.y(), p.z(), it.get_size(), node.get_semantics(), 2);
+              voxel_count++;
+            }
+            
+            if (iter_count % 1000 == 0) {
+              RCLCPP_DEBUG_STREAM(node_->get_logger(), "Processed " << iter_count << " nodes");
+            }
+            
+            // Increment iterator
+            ++it;
+          } catch (const std::exception& e) {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Exception at iteration " << iter_count << ": " << e.what());
+            break;
+          } catch (...) {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Unknown exception at iteration " << iter_count);
+            break;
+          }
+        }
+      } catch (const std::exception& e) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Exception during map iteration: " << e.what());
+        return;
       }
       m_pub_->publish();
-      ROS_INFO_STREAM("Published map visualization with " << voxel_count << " occupied voxels in frame 'map'");
     }
     
     // Load colors from ROS parameters
     bool load_colors_from_params() {
       if (m_pub_) {
-        return m_pub_->load_colors_from_params(nh_);
+        return m_pub_->load_colors_from_params(node_);
       }
       return false;
+    }
+    
+    // Load colors directly from YAML file
+    bool load_colors_from_yaml(const std::string& yaml_file_path) {
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MCDData::load_colors_from_yaml: Starting, file=" << yaml_file_path);
+      if (!m_pub_) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: m_pub_ is null, cannot load colors!");
+        return false;
+      }
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: m_pub_ is valid, calling load_colors_from_yaml");
+      bool result = m_pub_->load_colors_from_yaml(yaml_file_path);
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MCDData::load_colors_from_yaml: Result=" << result);
+      return result;
     }
 
     void set_up_evaluation(const std::string gt_label_dir, const std::string evaluation_result_dir) {
@@ -336,123 +467,183 @@ class MCDData {
       // Expected path: body/os_sensor/T (from hhs_calib.yaml)
       // Format: T is a list of 4 lists, each containing 4 doubles
       
-      XmlRpc::XmlRpcValue body_param;
-      if (!nh_.getParam("body", body_param)) {
-        ROS_ERROR_STREAM("ERROR: 'body' parameter not found in ROS parameter server!");
-        ROS_ERROR_STREAM("Make sure hhs_calib.yaml is loaded via rosparam in the launch file.");
-        return false;
-      }
-      
-      // Navigate to body/os_sensor/T
-      if (body_param.getType() != XmlRpc::XmlRpcValue::TypeStruct) {
-        ROS_ERROR_STREAM("ERROR: 'body' parameter is not a struct!");
-        return false;
-      }
-      
-      if (!body_param.hasMember("os_sensor")) {
-        ROS_ERROR_STREAM("ERROR: 'body/os_sensor' not found in calibration!");
-        return false;
-      }
-      
-      XmlRpc::XmlRpcValue os_sensor_param = body_param["os_sensor"];
-      if (os_sensor_param.getType() != XmlRpc::XmlRpcValue::TypeStruct) {
-        ROS_ERROR_STREAM("ERROR: 'body/os_sensor' is not a struct!");
-        return false;
-      }
-      
-      if (!os_sensor_param.hasMember("T")) {
-        ROS_ERROR_STREAM("ERROR: 'body/os_sensor/T' not found in calibration!");
-        return false;
-      }
-      
-      XmlRpc::XmlRpcValue T_param = os_sensor_param["T"];
-      if (T_param.getType() != XmlRpc::XmlRpcValue::TypeArray || T_param.size() != 4) {
-        ROS_ERROR_STREAM("ERROR: 'body/os_sensor/T' must be an array of 4 arrays!");
-        return false;
-      }
-      
-      // Parse the 4x4 matrix
-      for (int i = 0; i < 4; ++i) {
-        if (T_param[i].getType() != XmlRpc::XmlRpcValue::TypeArray || T_param[i].size() != 4) {
-          ROS_ERROR_STREAM("ERROR: Row " << i << " of body/os_sensor/T must be an array of 4 elements!");
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: load_calibration_from_params: Starting");
+      try {
+        // First, try to load from calibration_file parameter (YAML file path)
+        std::string calib_file;
+        if (node_->get_parameter("calibration_file", calib_file)) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Found calibration_file parameter: " << calib_file);
+          RCLCPP_INFO_STREAM(node_->get_logger(), "Loading calibration from YAML file: " << calib_file);
+          bool result = load_calibration_from_yaml(calib_file);
+          RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: load_calibration_from_yaml returned: " << result);
+          return result;
+        }
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: calibration_file parameter not found");
+        
+        // Fallback: try to get body parameter directly from ROS parameters
+        if (node_->has_parameter("body")) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "Calibration loading from ROS parameters not fully implemented. Please use calibration_file parameter.");
           return false;
         }
-        for (int j = 0; j < 4; ++j) {
-          // XmlRpcValue might store as double or int, convert to double
-          if (T_param[i][j].getType() == XmlRpc::XmlRpcValue::TypeDouble) {
-            body_to_lidar_tf_(i, j) = static_cast<double>(T_param[i][j]);
-          } else if (T_param[i][j].getType() == XmlRpc::XmlRpcValue::TypeInt) {
-            body_to_lidar_tf_(i, j) = static_cast<double>(static_cast<int>(T_param[i][j]));
-          } else {
-            ROS_ERROR_STREAM("ERROR: body/os_sensor/T[" << i << "][" << j << "] is not a number!");
+        
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: 'calibration_file' parameter not found in ROS parameter server!");
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "Make sure calibration_file parameter is set in the launch file pointing to hhs_calib.yaml.");
+        return false;
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "Error loading calibration: " << e.what());
+        return false;
+      }
+    }
+    
+    bool load_calibration_from_yaml(const std::string& yaml_file) {
+      RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: load_calibration_from_yaml: Loading file: " << yaml_file);
+      try {
+        YAML::Node yaml_node = YAML::LoadFile(yaml_file);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: YAML file loaded successfully");
+        if (!yaml_node["body"]) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: 'body' key not found in YAML file!");
+          RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: 'body' key not found in YAML file!");
+          return false;
+        }
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Found 'body' key in YAML");
+        
+        YAML::Node body_node = yaml_node["body"];
+        if (!body_node["os_sensor"]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: 'body/os_sensor' not found in calibration!");
+          return false;
+        }
+        
+        YAML::Node os_sensor_node = body_node["os_sensor"];
+        if (!os_sensor_node["T"]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: 'body/os_sensor/T' not found in calibration!");
+          return false;
+        }
+        
+        YAML::Node T_node = os_sensor_node["T"];
+        if (!T_node.IsSequence() || T_node.size() != 4) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: 'body/os_sensor/T' must be an array of 4 arrays!");
+          return false;
+        }
+        
+        // Parse the 4x4 matrix
+        for (int i = 0; i < 4; ++i) {
+          if (!T_node[i].IsSequence() || T_node[i].size() != 4) {
+            RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: Row " << i << " of body/os_sensor/T must be an array of 4 elements!");
             return false;
           }
+          for (int j = 0; j < 4; ++j) {
+            body_to_lidar_tf_(i, j) = T_node[i][j].as<double>();
+          }
         }
+        
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Successfully parsed calibration transform matrix");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "Successfully loaded body-to-lidar transform from body/os_sensor/T");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "Transform matrix:");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "  [" << body_to_lidar_tf_(0, 0) << ", " << body_to_lidar_tf_(0, 1) << ", " << body_to_lidar_tf_(0, 2) << ", " << body_to_lidar_tf_(0, 3) << "]");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "  [" << body_to_lidar_tf_(1, 0) << ", " << body_to_lidar_tf_(1, 1) << ", " << body_to_lidar_tf_(1, 2) << ", " << body_to_lidar_tf_(1, 3) << "]");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "  [" << body_to_lidar_tf_(2, 0) << ", " << body_to_lidar_tf_(2, 1) << ", " << body_to_lidar_tf_(2, 2) << ", " << body_to_lidar_tf_(2, 3) << "]");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "  [" << body_to_lidar_tf_(3, 0) << ", " << body_to_lidar_tf_(3, 1) << ", " << body_to_lidar_tf_(3, 2) << ", " << body_to_lidar_tf_(3, 3) << "]");
+        
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: load_calibration_from_yaml completed successfully");
+        return true;
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "Error loading calibration from YAML: " << e.what());
+        return false;
       }
-      
-      ROS_INFO_STREAM("Successfully loaded body-to-lidar transform from body/os_sensor/T");
-      ROS_INFO_STREAM("Transform matrix:");
-      ROS_INFO_STREAM("  [" << body_to_lidar_tf_(0, 0) << ", " << body_to_lidar_tf_(0, 1) << ", " << body_to_lidar_tf_(0, 2) << ", " << body_to_lidar_tf_(0, 3) << "]");
-      ROS_INFO_STREAM("  [" << body_to_lidar_tf_(1, 0) << ", " << body_to_lidar_tf_(1, 1) << ", " << body_to_lidar_tf_(1, 2) << ", " << body_to_lidar_tf_(1, 3) << "]");
-      ROS_INFO_STREAM("  [" << body_to_lidar_tf_(2, 0) << ", " << body_to_lidar_tf_(2, 1) << ", " << body_to_lidar_tf_(2, 2) << ", " << body_to_lidar_tf_(2, 3) << "]");
-      ROS_INFO_STREAM("  [" << body_to_lidar_tf_(3, 0) << ", " << body_to_lidar_tf_(3, 1) << ", " << body_to_lidar_tf_(3, 2) << ", " << body_to_lidar_tf_(3, 3) << "]");
-      
-      return true;
     }
 
-    void query_scan(std::string input_data_dir, std::string input_label_dir, int pose_idx) {
+    void query_scan(std::string input_data_dir, std::string /* input_label_dir */, int pose_idx) {
       if (pose_idx < 0 || pose_idx >= (int)lidar_poses_.size()) {
         return;
       }
-
-      // Get the actual scan file number from CSV
-      int scan_file_num = scan_indices_[pose_idx];
       
-      // Use 10-digit format for MCD file naming
-      char scan_id_c[256];
-      sprintf(scan_id_c, "%010d", scan_file_num);
-      std::string scan_name = input_data_dir + "/" + std::string(scan_id_c) + ".bin";
-      std::string gt_name = gt_label_dir_ + "/" + std::string(scan_id_c) + ".bin";
-      std::string result_name = evaluation_result_dir_ + "/" + std::string(scan_id_c) + ".txt";
-      
-      pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, gt_name);
-      if (cloud->points.empty()) {
+      if (!map_) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "Cannot query scan: map_ is null");
         return;
       }
 
-      Eigen::Matrix4d transform = lidar_poses_[pose_idx];  // This is body_to_world from pose
-      
-      // Apply body-to-lidar transformation (same as in process_scans)
-      // Following Python code: transform_matrix = body_to_world @ lidar_to_body
-      Eigen::Matrix4d lidar_to_body = body_to_lidar_tf_.inverse();
-      Eigen::Matrix4d new_transform = transform * lidar_to_body;  // body_to_world * lidar_to_body
-      pcl::transformPointCloud(*cloud, *cloud, new_transform);
+      try {
+        // Get the actual scan file number from CSV
+        int scan_file_num = scan_indices_[pose_idx];
+        
+        // Use 10-digit format for MCD file naming
+        char scan_id_c[256];
+        sprintf(scan_id_c, "%010d", scan_file_num);
+        // Helper function to join paths (handles trailing slashes)
+        auto join_path = [](const std::string& dir, const std::string& file) -> std::string {
+          if (dir.empty()) return file;
+          if (dir.back() == '/') return dir + file;
+          return dir + "/" + file;
+        };
+        std::string scan_name = join_path(input_data_dir, std::string(scan_id_c) + ".bin");
+        std::string gt_name = join_path(gt_label_dir_, std::string(scan_id_c) + ".bin");
+        std::string result_name = join_path(evaluation_result_dir_, std::string(scan_id_c) + ".txt");
+        
+        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, gt_name);
+        if (cloud->points.empty()) {
+          return;
+        }
 
-      std::ofstream result_file;
-      result_file.open(result_name);
-      for (int i = 0; i < (int)cloud->points.size(); ++i) {
-        semantic_bki::SemanticOcTreeNode node = map_->search(cloud->points[i].x, cloud->points[i].y, cloud->points[i].z);
-        int pred_label = 0;
-        if (node.get_state() == semantic_bki::State::OCCUPIED)
-          pred_label = node.get_semantics();
-        result_file << (int)cloud->points[i].label << " " << pred_label << "\n";
+        Eigen::Matrix4d transform = lidar_poses_[pose_idx];  // This is body_to_world from pose
+        
+        // Apply body-to-lidar transformation (same as in process_scans)
+        // Following Python code: transform_matrix = body_to_world @ lidar_to_body
+        Eigen::Matrix4d lidar_to_body = body_to_lidar_tf_.inverse();
+        Eigen::Matrix4d new_transform = transform * lidar_to_body;  // body_to_world * lidar_to_body
+        pcl::transformPointCloud(*cloud, *cloud, new_transform);
+
+        // Create directory if it doesn't exist
+        size_t last_slash = result_name.find_last_of('/');
+        if (last_slash != std::string::npos) {
+          std::string dir_path = result_name.substr(0, last_slash);
+          // Try to create directory (mkdir -p equivalent)
+          std::string mkdir_cmd = "mkdir -p " + dir_path;
+          int result = std::system(mkdir_cmd.c_str());
+          if (result != 0) {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "Failed to create directory: " << dir_path);
+          }
+        }
+        
+        std::ofstream result_file;
+        result_file.open(result_name);
+        if (!result_file.is_open()) {
+          RCLCPP_WARN_STREAM(node_->get_logger(), "Cannot open result file: " << result_name);
+          return;
+        }
+        
+        for (int i = 0; i < (int)cloud->points.size(); ++i) {
+          try {
+            semantic_bki::SemanticOcTreeNode node = map_->search(cloud->points[i].x, cloud->points[i].y, cloud->points[i].z);
+            int pred_label = 0;
+            if (node.get_state() == semantic_bki::State::OCCUPIED)
+              pred_label = node.get_semantics();
+            result_file << (int)cloud->points[i].label << " " << pred_label << "\n";
+          } catch (const std::exception& e) {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "Exception searching map for point " << i << ": " << e.what());
+            continue;
+          }
+        }
+        result_file.close();
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "Exception in query_scan(): " << e.what());
+      } catch (...) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "Unknown exception in query_scan()");
       }
-      result_file.close();
     }
 
   
   private:
-    ros::NodeHandle nh_;
+    rclcpp::Node::SharedPtr node_;
     double resolution_;
     double ds_resolution_;
     double free_resolution_;
     double max_range_;
     semantic_bki::SemanticBKIOctoMap* map_;
     semantic_bki::MarkerArrayPub* m_pub_;
-    ros::Publisher color_octomap_publisher_;
-    ros::Publisher pointcloud_pub_;  // Publisher for individual scan point clouds
-    tf::TransformListener listener_;
-    tf::TransformBroadcaster tf_broadcaster_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;  // Publisher for individual scan point clouds
+    tf2_ros::TransformBroadcaster tf_broadcaster_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    tf2_ros::TransformListener tf_listener_;
     std::ofstream pose_file_;
     std::vector<Eigen::Matrix4d> lidar_poses_;
     std::vector<int> scan_indices_;  // Maps pose index to actual scan file number (from CSV "num" column)
@@ -466,14 +657,14 @@ class MCDData {
       // Open scan file
       FILE* fp = std::fopen(fn.c_str(), "rb");
       if (!fp) {
-        ROS_WARN_STREAM("Cannot open scan file: " << fn);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Cannot open scan file: " << fn);
         return pcl::PointCloud<pcl::PointXYZL>::Ptr(new pcl::PointCloud<pcl::PointXYZL>);
       }
 
       // Open label file
       FILE* fp_label = std::fopen(fn_label.c_str(), "rb");
       if (!fp_label) {
-        ROS_WARN_STREAM("Cannot open label file: " << fn_label);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Cannot open label file: " << fn_label);
         std::fclose(fp);
         return pcl::PointCloud<pcl::PointXYZL>::Ptr(new pcl::PointCloud<pcl::PointXYZL>);
       }
@@ -486,12 +677,19 @@ class MCDData {
 
       // Preallocate point cloud for better performance (avoids reallocation)
       pcl::PointCloud<pcl::PointXYZL>::Ptr pc(new pcl::PointCloud<pcl::PointXYZL>);
+      if (!pc) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Failed to allocate point cloud!");
+        std::fclose(fp);
+        std::fclose(fp_label);
+        return pcl::PointCloud<pcl::PointXYZL>::Ptr(new pcl::PointCloud<pcl::PointXYZL>);
+      }
       pc->points.reserve(n_hits);  // Preallocate to avoid reallocation overhead
       pc->width = n_hits;
       pc->height = 1;
       pc->is_dense = false;
 
       // Read data in a tighter loop
+      int points_read = 0;
       for (int i = 0; i < n_hits; i++) {
         pcl::PointXYZL point;
         float intensity;
@@ -508,6 +706,7 @@ class MCDData {
 
         point.label = (int)label;
         pc->points.push_back(point);
+        points_read++;
       }
       
       std::fclose(fp);
