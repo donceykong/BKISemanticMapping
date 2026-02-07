@@ -1,30 +1,32 @@
 # MCD dataset config
 
-# Map information
-resolution: 1.0
-num_class: 22 # Number of classes (MCD typically uses 22 classes)
+/**:
+  ros__parameters:
+    # Map information
+    resolution: 1.0
+    num_class: 22 # Number of classes (MCD uses 29 classes)
 
-# Sampling resolutions
-free_resolution: 100 # Free space sampling resolution
-ds_resolution: 1.0 # Downsampling factor
+    # Sampling resolutions
+    free_resolution: 200.0 # Free space sampling resolution
+    ds_resolution: 1.0 # Downsampling factor
 
-# Information about range-finder data
-scan_num: 10000 # How many scans to use
-max_range: -1 # Sensor max range (m)
-skip_frames: 10 # Number of frames to skip between insertions (0 = process every frame, 1 = process every other frame, etc.)
+    # Information about range-finder data
+    scan_num: 10000 # How many scans to use
+    max_range: 200.0 # Sensor max range (m)
+    skip_frames: 10 # Number of frames to skip between insertions (0 = process every frame, 1 = process every other frame, etc.)
 
-# Dataset information
-input_data_prefix: lidar_bin/data
-input_label_prefix: inferred_labels
-lidar_pose_file: pose_inW.csv
-gt_label_prefix: gt_labels
-evaluation_result_prefix: evaluations/
-query: true
-visualize: true
+    # Dataset information
+    input_data_prefix: lidar_bin/data
+    input_label_prefix: inferred_labels
+    lidar_pose_file: pose_inW.csv
+    gt_label_prefix: inferred_labels
+    evaluation_result_prefix: evaluations/
+    query: true
+    visualize: true
 
-# Color configuration
-colors_file: mcd_colors.yaml  # Color mapping file (relative to config/datasets/)
+    # Color configuration
+    colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
 
-# OSM visualization
-show_osm: true  # Set to true to visualize OSM geometries in RViz
-osm_bin_file: kth_day_06_osm_geometries.bin  # OSM bin file (relative to data/mcd/)
+    # OSM visualization
+    show_osm: true  # Set to true to visualize OSM geometries in RViz
+    osm_bin_file: kth_day_06_osm_geometries.bin  # OSM bin file (relative to data/mcd/)
