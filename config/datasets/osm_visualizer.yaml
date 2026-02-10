@@ -1,0 +1,13 @@
+# OSM Visualizer standalone config
+# Use with: ros2 launch semantic_bki osm_visualizer_launch.py
+
+/**:
+  ros__parameters:
+    osm_file: kth_large.osm  # Path (relative to data/mcd/ or absolute)
+    osm_origin_lat: 59.348268650
+    osm_origin_lon: 18.073204280
+    publish_rate: 2.0
+    topic: /osm_geometries
+    # Optional: Transform OSM data to first pose origin (so both start at 0,0,0)
+    lidar_pose_file: pose_inW.csv  # Pose file path (relative to data_dir or absolute)
+    data_dir: ""  # Data directory (if empty, will try package share/data/mcd/)
