@@ -43,6 +43,58 @@ if(yaml-cpp_FOUND)
 endif()
 find_package(PCL REQUIRED)
 
+# Find libosmium for OSM parsing
+set(LIBOSMIUM_FOUND FALSE)
+set(LIBOSMIUM_INCLUDE_DIRS "")
+
+# Try pkg-config first
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(LIBOSMIUM QUIET libosmium)
+  if(LIBOSMIUM_FOUND)
+    message(STATUS "Found libosmium via pkg-config")
+  endif()
+endif()
+
+# If pkg-config didn't find it, try find_path
+# libosmium2-dev installs headers in /usr/include/osmium
+if(NOT LIBOSMIUM_FOUND)
+  # Check if /usr/include/osmium exists (most common location)
+  if(EXISTS "/usr/include/osmium/io/any_input.hpp")
+    set(LIBOSMIUM_INCLUDE_DIRS "/usr/include")
+    set(LIBOSMIUM_FOUND TRUE)
+    message(STATUS "Found libosmium headers at ${LIBOSMIUM_INCLUDE_DIRS}/osmium")
+  elseif(EXISTS "/usr/local/include/osmium/io/any_input.hpp")
+    set(LIBOSMIUM_INCLUDE_DIRS "/usr/local/include")
+    set(LIBOSMIUM_FOUND TRUE)
+    message(STATUS "Found libosmium headers at ${LIBOSMIUM_INCLUDE_DIRS}/osmium")
+  else()
+    # Try find_path as fallback
+    find_path(LIBOSMIUM_INCLUDE_DIRS 
+      NAMES osmium/io/any_input.hpp
+      PATHS /usr/include /usr/local/include /opt/local/include
+    )
+    if(LIBOSMIUM_INCLUDE_DIRS)
+      set(LIBOSMIUM_FOUND TRUE)
+      message(STATUS "Found libosmium headers at ${LIBOSMIUM_INCLUDE_DIRS}")
+    endif()
+  endif()
+endif()
+
+if(LIBOSMIUM_FOUND)
+  include_directories(${LIBOSMIUM_INCLUDE_DIRS})
+  if(LIBOSMIUM_LIBRARY_DIRS)
+    link_directories(${LIBOSMIUM_LIBRARY_DIRS})
+  endif()
+  if(LIBOSMIUM_LIBRARIES)
+    message(STATUS "Found libosmium libraries: ${LIBOSMIUM_LIBRARIES}")
+  else()
+    message(STATUS "libosmium is header-only, no libraries needed")
+  endif()
+else()
+  message(FATAL_ERROR "libosmium not found! Please install libosmium-dev (Debian/Ubuntu: sudo apt-get install libosmium2-dev)")
+endif()
+
 ###########
 ## Build ##
 ###########
@@ -89,6 +141,11 @@ add_executable(mcd_node
   ${COMMON_SOURCE_FILES}
   src/common/osm_visualizer.cpp
   src/mcd_node.cpp
+)
+
+add_executable(osm_visualizer_node
+  src/common/osm_visualizer.cpp
+  src/osm_visualizer_node.cpp
 )
 
 ament_target_dependencies(toy_example_node
@@ -154,7 +211,31 @@ target_link_libraries(mcd_node
   ${OpenCV_LIBRARIES}
   ${PCL_LIBRARIES}
   yaml-cpp
+  expat
+  bz2
+  z
 )
+
+ament_target_dependencies(osm_visualizer_node
+  rclcpp
+  geometry_msgs
+  visualization_msgs
+  std_msgs
+  ament_index_cpp
+  OpenCV
+)
+
+target_link_libraries(osm_visualizer_node
+  ${OpenCV_LIBRARIES}
+  expat
+  bz2
+  z
+)
+if(LIBOSMIUM_LIBRARIES)
+  target_link_libraries(osm_visualizer_node
+    ${LIBOSMIUM_LIBRARIES}
+  )
+endif()
 
 #############
 ## Install ##
@@ -165,6 +246,7 @@ install(TARGETS
   kitti_node
   semantickitti_node
   mcd_node
+  osm_visualizer_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
