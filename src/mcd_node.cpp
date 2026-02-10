@@ -15,7 +15,6 @@
 #include "bkioctomap.h"
 #include "markerarray_pub.h"
 #include "mcd_util.h"
-#include "osm_visualizer.h"
 
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
@@ -78,8 +77,6 @@ int main(int argc, char **argv) {
     node->declare_parameter<bool>("query", query);
     node->declare_parameter<bool>("visualize", visualize);
     node->declare_parameter<std::string>("colors_file", "");
-    node->declare_parameter<bool>("show_osm", false);
-    node->declare_parameter<std::string>("osm_bin_file", "");
     node->declare_parameter<std::string>("calibration_file", "");
 
     // Get parameters
@@ -110,12 +107,6 @@ int main(int argc, char **argv) {
     // Color configuration
     std::string colors_file;
     node->get_parameter<std::string>("colors_file", colors_file);
-    
-    // OSM visualization
-    bool show_osm = false;
-    std::string osm_bin_file;
-    node->get_parameter<bool>("show_osm", show_osm);
-    node->get_parameter<std::string>("osm_bin_file", osm_bin_file);
     
     // Calibration file
     std::string calibration_file;
@@ -220,115 +211,8 @@ int main(int argc, char **argv) {
       }
     }
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Color loading completed");
-    
-    // Load and visualize OSM geometries if enabled (do this BEFORE processing scans)
-    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to check OSM visualization. show_osm=" << show_osm << ", osm_bin_file=" << osm_bin_file);
-    semantic_bki::OSMVisualizer* osm_visualizer = nullptr;
-    if (show_osm && !osm_bin_file.empty()) {
-        RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM visualization enabled. Loading OSM bin file: " << osm_bin_file);
-        RCLCPP_INFO_STREAM(node->get_logger(), "OSM visualization enabled. Loading OSM bin file: " << osm_bin_file);
-        
-        try {
-            // Construct full path to OSM bin file
-            std::string full_osm_bin_path;
-            if (osm_bin_file[0] == '/') {
-                // Absolute path
-                full_osm_bin_path = osm_bin_file;
-            } else {
-                // Relative to dir (which already contains the full path to data/mcd)
-                full_osm_bin_path = dir + "/" + osm_bin_file;
-            }
-            
-            RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM bin file path: " << full_osm_bin_path);
-            RCLCPP_INFO_STREAM(node->get_logger(), "Looking for OSM bin file at: " << full_osm_bin_path);
-            
-            // Check if bin file exists
-            std::ifstream bin_check(full_osm_bin_path);
-            if (!bin_check.good()) {
-                RCLCPP_WARN_STREAM(node->get_logger(), "WARNING: OSM bin file not found: " << full_osm_bin_path);
-                RCLCPP_ERROR_STREAM(node->get_logger(), "OSM bin file not found: " << full_osm_bin_path);
-            } else {
-                bin_check.close();
-                RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM bin file exists, about to create visualizer");
-                
-                // Load directly from binary file (created by create_map_OSM_BEV_GEOM.py)
-                // The file is already in raw binary format, similar to lidar .bin files
-                std::string binary_file = full_osm_bin_path;
-                
-                // Create OSM visualizer and load from binary file
-                std::string osm_topic = "/osm_geometries";
-                RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Creating OSM visualizer with topic: " << osm_topic);
-                RCLCPP_INFO_STREAM(node->get_logger(), "Creating OSM visualizer with topic: " << osm_topic);
-                RCLCPP_INFO_STREAM(node->get_logger(), "Loading OSM geometries from binary file: " << binary_file);
-                osm_visualizer = new semantic_bki::OSMVisualizer(node, osm_topic);
-                RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM visualizer created successfully");
-                
-                // Wait a bit for publisher to be ready
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                
-                RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to load OSM geometries from binary file");
-                if (osm_visualizer->loadFromBinary(binary_file)) {
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM geometries loaded successfully");
-                    RCLCPP_INFO(node->get_logger(), "Successfully loaded OSM geometries.");
-                    
-                    // Transform OSM data to be relative to first pose origin (same as scans/map)
-                    // This applies the same transformation: first_pose_inverse
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to transform OSM data to first pose origin");
-                    Eigen::Matrix4d original_first_pose = mcd_data.getOriginalFirstPose();
-                    osm_visualizer->transformToFirstPoseOrigin(original_first_pose);
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM data transformed successfully");
-                    
-                    RCLCPP_INFO(node->get_logger(), "Starting periodic publishing...");
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to call publish() immediately");
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: osm_visualizer pointer: " << osm_visualizer);
-                    // Publish immediately
-                    if (osm_visualizer) {
-                        osm_visualizer->publish();
-                        RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Immediate publish() call completed");
-                    } else {
-                        RCLCPP_ERROR(node->get_logger(), "CHECKPOINT: ERROR - osm_visualizer is null!");
-                    }
-                    // Start periodic publishing at 2 Hz (more frequent for better visibility)
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to start periodic publishing");
-                    if (osm_visualizer) {
-                        osm_visualizer->startPeriodicPublishing(2.0);
-                        RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM publishing started");
-                        RCLCPP_INFO_STREAM(node->get_logger(), "OSM geometries will be published continuously to topic: " << osm_topic << " at 2 Hz");
-                    } else {
-                        RCLCPP_ERROR(node->get_logger(), "CHECKPOINT: ERROR - Cannot start periodic publishing, osm_visualizer is null!");
-                    }
-                    
-                    // Give publisher time to be ready and ensure messages are sent
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Waiting for publisher to be ready...");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Publisher ready, continuing...");
-                } else {
-                    RCLCPP_WARN_STREAM(node->get_logger(), "WARNING: Failed to load OSM geometries from binary file!");
-                    RCLCPP_ERROR(node->get_logger(), "Failed to load OSM geometries from binary file.");
-                    delete osm_visualizer;
-                    osm_visualizer = nullptr;
-                }
-            }
-        } catch (const std::exception& e) {
-            RCLCPP_WARN_STREAM(node->get_logger(), "WARNING: Exception while creating/loading OSM visualizer: " << e.what());
-            RCLCPP_ERROR_STREAM(node->get_logger(), "Exception while creating/loading OSM visualizer: " << e.what());
-            if (osm_visualizer) {
-                delete osm_visualizer;
-                osm_visualizer = nullptr;
-            }
-        }
-    } else {
-        if (!show_osm) {
-            RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM visualization disabled");
-            RCLCPP_INFO(node->get_logger(), "OSM visualization is disabled (show_osm: false). Set show_osm: true in mcd.yaml to enable.");
-        } else if (osm_bin_file.empty()) {
-            RCLCPP_WARN_STREAM(node->get_logger(), "WARNING: OSM visualization enabled but osm_bin_file is empty!");
-            RCLCPP_WARN(node->get_logger(), "OSM visualization is enabled but osm_bin_file is not specified");
-        }
-    }
-    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: OSM visualization setup completed");
 
-    // Now process scans (OSM markers are already publishing)
+    // Process scans
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to set up evaluation");
     mcd_data.set_up_evaluation(dir + '/' + gt_label_prefix, dir + '/' + evaluation_result_prefix);
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Evaluation setup completed");
@@ -342,10 +226,6 @@ int main(int argc, char **argv) {
     rclcpp::spin(node);
     
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: rclcpp::spin() returned (node shutdown)");
-    
-    if (osm_visualizer) {
-        delete osm_visualizer;
-    }
     
     rclcpp::shutdown();
     return 0;

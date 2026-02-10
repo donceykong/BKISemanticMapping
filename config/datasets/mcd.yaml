@@ -26,7 +26,3 @@
 
     # Color configuration
     colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
-
-    # OSM visualization
-    show_osm: true  # Set to true to visualize OSM geometries in RViz
-    osm_bin_file: kth_day_06_osm_geometries.bin  # OSM bin file (relative to data/mcd/)

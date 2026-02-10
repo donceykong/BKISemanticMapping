@@ -1,17 +1,104 @@
 #include "osm_visualizer.h"
 #include <sstream>
 #include <cmath>
-#include <cstdlib>
-#include <cstdio>
-#include <cstdint>
-#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <vector>
+#include <string>
 #include <memory>
+#include <algorithm>
+#include <limits>
 #include <Eigen/Dense>
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
+#include <osmium/io/any_input.hpp>
+#include <osmium/handler.hpp>
+#include <osmium/visitor.hpp>
+#include <osmium/osm/way.hpp>
+#include <osmium/osm/node.hpp>
+#include <osmium/index/map/sparse_mem_array.hpp>
+#include <osmium/handler/node_locations_for_ways.hpp>
+#include <osmium/osm/location.hpp>
+
+namespace {
+    // Handler class for extracting buildings, roads, and sidewalks from OSM data using libosmium
+    class OSMGeometryHandler : public osmium::handler::Handler {
+    public:
+        OSMGeometryHandler(double origin_lat, double origin_lon, 
+                          std::vector<semantic_bki::Geometry2D>& buildings,
+                          std::vector<semantic_bki::Geometry2D>& roads)
+            : origin_lat_(origin_lat), origin_lon_(origin_lon), 
+              buildings_(buildings), roads_(roads) {
+            kMetersPerDegLat_ = 110540.0;
+            kMetersPerDegLon_ = 111320.0 * std::cos(origin_lat * M_PI / 180.0);
+        }
+
+        void way(const osmium::Way& way) {
+            // Extract node coordinates
+            semantic_bki::Geometry2D geom;
+            for (const auto& node_ref : way.nodes()) {
+                const osmium::Location& location = node_ref.location();
+                if (location.valid()) {
+                    double lat = location.lat();
+                    double lon = location.lon();
+                    // Relative meters from origin (East, North) - same convention as ROS1 binary / create_scan_osm_topdown.py
+                    float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
+                    float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
+                    geom.coords.push_back({x, y});
+                }
+            }
+
+            if (geom.coords.size() < 2) {
+                return; // Need at least 2 points
+            }
+
+            // Check if this way is a building
+            const char* building_tag = way.tags()["building"];
+            if (building_tag) {
+                // Only add if we have at least 3 points (valid polygon)
+                if (geom.coords.size() >= 3) {
+                    buildings_.push_back(geom);
+                }
+                return;
+            }
+
+            // Check if this way is a road or sidewalk
+            const char* highway_tag = way.tags()["highway"];
+            if (highway_tag) {
+                // Include various road types and pedestrian paths
+                std::string highway(highway_tag);
+                if (highway == "motorway" || highway == "trunk" || highway == "primary" || 
+                    highway == "secondary" || highway == "tertiary" || 
+                    highway == "unclassified" || highway == "residential" ||
+                    highway == "motorway_link" || highway == "trunk_link" ||
+                    highway == "primary_link" || highway == "secondary_link" ||
+                    highway == "tertiary_link" || highway == "living_street" ||
+                    highway == "service" || highway == "pedestrian" ||
+                    highway == "road" || highway == "cycleway" ||
+                    highway == "footway" || highway == "path" || highway == "foot") {
+                    roads_.push_back(geom);
+                }
+                return;
+            }
+
+            // Check for sidewalks (footway=sidewalk or highway=footway with footway=sidewalk)
+            const char* footway_tag = way.tags()["footway"];
+            if (footway_tag && std::string(footway_tag) == "sidewalk") {
+                roads_.push_back(geom);
+                return;
+            }
+        }
+
+    private:
+        double origin_lat_, origin_lon_;
+        double kMetersPerDegLat_, kMetersPerDegLon_;
+        std::vector<semantic_bki::Geometry2D>& buildings_;
+        std::vector<semantic_bki::Geometry2D>& roads_;
+    };
+}
 
 namespace semantic_bki {
 
     OSMVisualizer::OSMVisualizer(rclcpp::Node::SharedPtr node, const std::string& topic) 
-        : node_(node), topic_(topic), frame_id_("map") {
+        : node_(node), topic_(topic), frame_id_("map"), transformed_(false) {
         if (!node_) {
             RCLCPP_ERROR_STREAM(rclcpp::get_logger("osm_visualizer"), "ERROR: OSMVisualizer constructor: node_ is null!");
             return;
@@ -33,140 +120,48 @@ namespace semantic_bki {
         }
     }
 
-    bool OSMVisualizer::loadFromBinary(const std::string& bin_file) {
-        std::ifstream file(bin_file, std::ios::binary);
-        if (!file.is_open()) {
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to open binary file: " << bin_file);
-            return false;
-        }
-        
-        // Get file size for debugging
-        file.seekg(0, std::ios::end);
-        size_t file_size = file.tellg();
-        file.seekg(0, std::ios::beg);
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSM binary file size: " << file_size << " bytes");
-        
+    bool OSMVisualizer::loadFromOSM(const std::string& osm_file, double origin_lat, double origin_lon) {
         buildings_.clear();
         roads_.clear();
-        grasslands_.clear();
-        trees_.clear();
-        wood_.clear();
         
-        // Binary format (matches create_map_OSM_BEV_GEOM.py):
-        // For each geometry type (buildings, roads, grasslands, trees, wood):
-        //   uint32_t num_geometries (4 bytes, native endian)
-        //   For each geometry:
-        //     uint32_t num_points (4 bytes)
-        //     num_points * (float x, float y) (8 bytes per point: 4 bytes x, 4 bytes y)
-        // Format: struct.pack('I', count) then struct.pack('I', num_points) then struct.pack('ff', x, y) for each point
+        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer::loadFromOSM called with file: " << osm_file);
+        RCLCPP_INFO_STREAM(node_->get_logger(), "  Origin: (" << origin_lat << ", " << origin_lon << ")");
         
-        // Helper lambda to read geometry data
-        auto read_geometries = [&](std::vector<Geometry2D>& geometries, const std::string& name) -> bool {
-            // Check file state before reading
-            if (!file.good()) {
-                RCLCPP_ERROR_STREAM(node_->get_logger(), "File not in good state before reading " << name);
-                return false;
+        try {
+            osmium::io::File input_file(osm_file);
+            osmium::io::Reader reader(input_file);
+            
+            // Create index to store node locations
+            osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location> index;
+            
+            // Handler to store node locations
+            osmium::handler::NodeLocationsForWays<osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>> 
+                location_handler(index);
+            
+            // Create handler to extract buildings, roads, and sidewalks
+            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_);
+            
+            // Apply handlers: first store node locations, then process ways
+            osmium::apply(reader, location_handler, handler);
+            reader.close();
+            
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings and " << roads_.size() << " roads/sidewalks from OSM file using libosmium");
+            
+            if (buildings_.empty() && roads_.empty()) {
+                RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings or roads found in OSM file! Check if file contains building or highway tags.");
             }
             
-            size_t pos_before = file.tellg();
-            uint32_t num_geometries;
-            if (file.read(reinterpret_cast<char*>(&num_geometries), sizeof(uint32_t)).gcount() != sizeof(uint32_t)) {
-                RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to read number of " << name << " from binary file (at position " << pos_before << ", file size " << file_size << ")");
-                return false;
-            }
+            size_t total_building_points = 0;
+            for (const auto& b : buildings_) total_building_points += b.coords.size();
+            size_t total_road_points = 0;
+            for (const auto& r : roads_) total_road_points += r.coords.size();
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Total building points: " << total_building_points << ", Total road points: " << total_road_points);
             
-            RCLCPP_DEBUG_STREAM(node_->get_logger(), "Reading " << num_geometries << " " << name << " geometries");
-            
-            for (uint32_t i = 0; i < num_geometries; ++i) {
-                Geometry2D geom;
-                uint32_t num_points;
-                if (file.read(reinterpret_cast<char*>(&num_points), sizeof(uint32_t)).gcount() != sizeof(uint32_t)) {
-                    RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to read point count for " << name << " " << i);
-                    return false;
-                }
-                
-                for (uint32_t j = 0; j < num_points; ++j) {
-                    float x, y;
-                    if (file.read(reinterpret_cast<char*>(&x), sizeof(float)).gcount() != sizeof(float) ||
-                        file.read(reinterpret_cast<char*>(&y), sizeof(float)).gcount() != sizeof(float)) {
-                        RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to read coordinates for " << name << " " << i << ", point " << j);
-                        return false;
-                    }
-                    geom.coords.push_back(std::make_pair(x, y));
-                }
-                geometries.push_back(geom);
-            }
-            
-            size_t pos_after = file.tellg();
-            RCLCPP_DEBUG_STREAM(node_->get_logger(), "Finished reading " << name << ", file position now at " << pos_after);
             return true;
-        };
-
-        if (!read_geometries(buildings_, "buildings")) { 
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to read buildings"); 
-            file.close(); 
-            return false; 
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR_STREAM(node_->get_logger(), "Error parsing OSM file with libosmium: " << e.what());
+            return false;
         }
-        if (!read_geometries(roads_, "roads")) { 
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to read roads"); 
-            file.close(); 
-            return false; 
-        }
-        if (!read_geometries(grasslands_, "grasslands")) { 
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to read grasslands"); 
-            file.close(); 
-            return false; 
-        }
-        
-        // Trees and wood are optional (for backward compatibility with old binary files)
-        // Check if we've reached end of file before trying to read them
-        size_t current_pos = file.tellg();
-        if (current_pos < file_size && (file_size - current_pos) >= sizeof(uint32_t)) {
-            // Save position before attempting to read trees
-            auto trees_start_pos = file.tellg();
-            // Try to read trees (may fail if file is in old format without trees/wood data)
-            if (!read_geometries(trees_, "trees")) { 
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Failed to read trees (file may be in old format without trees/wood data)"); 
-                // Reset file state and rewind to start of trees block
-                file.clear();
-                file.seekg(trees_start_pos);
-                trees_.clear();
-            }
-        } else {
-            RCLCPP_INFO_STREAM(node_->get_logger(), "Reached end of file after grasslands. Binary file is in old format (no trees/wood data).");
-        }
-        
-        // Try to read wood if there's still data
-        current_pos = file.tellg();
-        if (current_pos < file_size && (file_size - current_pos) >= sizeof(uint32_t)) {
-            // Save position before attempting to read wood
-            auto wood_start_pos = file.tellg();
-            if (!read_geometries(wood_, "wood")) { 
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Failed to read wood (file may be in old format without wood data)"); 
-                // Reset file state and rewind to start of wood block
-                file.clear();
-                file.seekg(wood_start_pos);
-                wood_.clear();
-            }
-        }
-        
-        file.close();
-        
-        RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded OSM geometries from binary file: " << buildings_.size() << " buildings, " 
-                      << roads_.size() << " roads, " << grasslands_.size() << " grasslands, "
-                      << trees_.size() << " trees, " << wood_.size() << " wood");
-        
-        // Count total points for debugging
-        size_t total_points = 0;
-        for (const auto& b : buildings_) total_points += b.coords.size();
-        for (const auto& r : roads_) total_points += r.coords.size();
-        for (const auto& g : grasslands_) total_points += g.coords.size();
-        for (const auto& t : trees_) total_points += t.coords.size();
-        for (const auto& w : wood_) total_points += w.coords.size();
-        RCLCPP_INFO_STREAM(node_->get_logger(), "Total OSM points loaded: " << total_points);
-        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: OSM data loaded successfully - buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", wood=" << wood_.size());
-        
-        return true;
     }
 
     visualization_msgs::msg::Marker OSMVisualizer::createBuildingMarker(const std::vector<Geometry2D>& buildings) {
@@ -175,17 +170,17 @@ namespace semantic_bki {
         marker.header.stamp = node_->now();
         marker.ns = "osm_buildings";
         marker.id = 0;
-        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST; // Use LINE_LIST for building outlines
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.5; // Line width (increased for visibility)
+        marker.scale.x = 0.5; // Line width in meters
         marker.color.r = 0.0;
         marker.color.g = 0.0;
         marker.color.b = 1.0;
-        marker.color.a = 1.0;
+        marker.color.a = 1.0; // Fully opaque blue lines
 
         for (const auto& building : buildings) {
-            if (building.coords.size() < 2) continue;
+            if (building.coords.size() < 2) continue; // Need at least 2 points for a line
             
             // Check for NaN or invalid coordinates and skip if found
             bool has_invalid = false;
@@ -201,18 +196,20 @@ namespace semantic_bki {
                 continue;
             }
             
-            // Create closed polygon by connecting points
+            // Draw closed polygon outline by connecting consecutive points
             for (size_t i = 0; i < building.coords.size(); ++i) {
                 geometry_msgs::msg::Point p1, p2;
                 p1.x = building.coords[i].first;
                 p1.y = building.coords[i].second;
                 p1.z = 0.0;
                 
+                // Connect to next point (wrap around for closed polygon)
                 size_t next_idx = (i + 1) % building.coords.size();
                 p2.x = building.coords[next_idx].first;
                 p2.y = building.coords[next_idx].second;
                 p2.z = 0.0;
                 
+                // Add line segment: p1 -> p2
                 marker.points.push_back(p1);
                 marker.points.push_back(p2);
             }
@@ -224,36 +221,36 @@ namespace semantic_bki {
     visualization_msgs::msg::Marker OSMVisualizer::createRoadMarker(const std::vector<Geometry2D>& roads) {
         visualization_msgs::msg::Marker marker;
         marker.header.frame_id = frame_id_;
-        marker.header.stamp = rclcpp::Time(0);
+        marker.header.stamp = node_->now();
         marker.ns = "osm_roads";
         marker.id = 1;
-        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST; // Use LINE_LIST for road polylines
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.6; // Line width (increased for visibility)
+        marker.scale.x = 0.3; // Line width in meters (thinner than buildings)
         marker.color.r = 1.0;
         marker.color.g = 0.0;
         marker.color.b = 0.0;
-        marker.color.a = 1.0;
+        marker.color.a = 1.0; // Fully opaque red lines
 
         for (const auto& road : roads) {
-            if (road.coords.size() < 2) continue;
+            if (road.coords.size() < 2) continue; // Need at least 2 points for a line
             
-            // Check for NaN or invalid coordinates and skip if found
+            // Check for NaN or invalid coordinates
             bool has_invalid = false;
             for (const auto& coord : road.coords) {
-                if (std::isnan(coord.first) || std::isnan(coord.second) || 
+                if (std::isnan(coord.first) || std::isnan(coord.second) ||
                     std::isinf(coord.first) || std::isinf(coord.second)) {
                     has_invalid = true;
                     break;
                 }
             }
             if (has_invalid) {
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping road linestring with invalid (NaN/Inf) coordinates");
+                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping road polyline with invalid (NaN/Inf) coordinates");
                 continue;
             }
             
-            // Connect consecutive points within each road segment using LINE_LIST
+            // Draw polyline by connecting consecutive points
             for (size_t i = 0; i < road.coords.size() - 1; ++i) {
                 geometry_msgs::msg::Point p1, p2;
                 p1.x = road.coords[i].first;
@@ -264,6 +261,7 @@ namespace semantic_bki {
                 p2.y = road.coords[i + 1].second;
                 p2.z = 0.0;
                 
+                // Add line segment: p1 -> p2
                 marker.points.push_back(p1);
                 marker.points.push_back(p2);
             }
@@ -272,190 +270,37 @@ namespace semantic_bki {
         return marker;
     }
 
-    visualization_msgs::msg::Marker OSMVisualizer::createGrasslandMarker(const std::vector<Geometry2D>& grasslands) {
+    visualization_msgs::msg::Marker OSMVisualizer::createPathMarker() const {
         visualization_msgs::msg::Marker marker;
         marker.header.frame_id = frame_id_;
-        marker.header.stamp = rclcpp::Time(0);
-        marker.ns = "osm_grasslands";
+        marker.header.stamp = node_->now();
+        marker.ns = "lidar_path";
         marker.id = 2;
-        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.5; // Line width (increased for visibility)
-        marker.color.r = 0.5;
-        marker.color.g = 0.8;
-        marker.color.b = 0.3;
-        marker.color.a = 1.0; // Fully opaque for better visibility
-
-        for (const auto& grassland : grasslands) {
-            if (grassland.coords.size() < 3) continue;
-            
-            // Check for NaN or invalid coordinates and skip if found
-            bool has_invalid = false;
-            for (const auto& coord : grassland.coords) {
-                if (std::isnan(coord.first) || std::isnan(coord.second) || 
-                    std::isinf(coord.first) || std::isinf(coord.second)) {
-                    has_invalid = true;
-                    break;
-                }
-            }
-            if (has_invalid) {
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping grassland polygon with invalid (NaN/Inf) coordinates");
-                continue;
-            }
-            
-            // Create closed polygon by connecting consecutive points
-            for (size_t i = 0; i < grassland.coords.size(); ++i) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = grassland.coords[i].first;
-                p1.y = grassland.coords[i].second;
-                p1.z = 0.0;
-                
-                size_t next_idx = (i + 1) % grassland.coords.size();
-                p2.x = grassland.coords[next_idx].first;
-                p2.y = grassland.coords[next_idx].second;
-                p2.z = 0.0;
-                
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
-            }
-        }
-        
-        return marker;
-    }
-
-    visualization_msgs::msg::Marker OSMVisualizer::createTreeMarker(const std::vector<Geometry2D>& trees) {
-        visualization_msgs::msg::Marker marker;
-        marker.header.frame_id = frame_id_;
-        marker.header.stamp = rclcpp::Time(0);
-        marker.ns = "osm_trees";
-        marker.id = 3;
-        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.5; // Line width (increased for visibility)
+        marker.scale.x = 0.4;  // Line width
         marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
-        marker.color.a = 1.0; // Fully opaque for better visibility
+        marker.color.a = 1.0;  // Green, opaque
 
-        for (const auto& tree : trees) {
-            if (tree.coords.empty()) continue;
-            
-            // Check for NaN or invalid coordinates
-            bool has_invalid = false;
-            for (const auto& coord : tree.coords) {
-                if (std::isnan(coord.first) || std::isnan(coord.second) || 
-                    std::isinf(coord.first) || std::isinf(coord.second)) {
-                    has_invalid = true;
-                    break;
-                }
-            }
-            if (has_invalid) {
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping tree geometry with invalid (NaN/Inf) coordinates");
-                continue;
-            }
-            
-            if (tree.coords.size() == 1) {
-                // Single point - create a small circle by adding 4 points around it
-                // This makes it visible as a small square/circle
-                float x = tree.coords[0].first;
-                float y = tree.coords[0].second;
-                float radius = 0.5; // Small radius for visibility
-                
-                // Create a small square around the point
-                geometry_msgs::msg::Point p1, p2, p3, p4;
-                p1.x = x - radius; p1.y = y - radius; p1.z = 0.0;
-                p2.x = x + radius; p2.y = y - radius; p2.z = 0.0;
-                p3.x = x + radius; p3.y = y + radius; p3.z = 0.0;
-                p4.x = x - radius; p4.y = y + radius; p4.z = 0.0;
-                
-                // Connect points to form a square
-                marker.points.push_back(p1); marker.points.push_back(p2);
-                marker.points.push_back(p2); marker.points.push_back(p3);
-                marker.points.push_back(p3); marker.points.push_back(p4);
-                marker.points.push_back(p4); marker.points.push_back(p1);
-            } else if (tree.coords.size() >= 2) {
-                // LineString or Polygon
-                for (size_t i = 0; i < tree.coords.size() - 1; ++i) {
-                    geometry_msgs::msg::Point p1, p2;
-                    p1.x = tree.coords[i].first;
-                    p1.y = tree.coords[i].second;
-                    p1.z = 0.0;
-                    
-                    p2.x = tree.coords[i + 1].first;
-                    p2.y = tree.coords[i + 1].second;
-                    p2.z = 0.0;
-                    
-                    marker.points.push_back(p1);
-                    marker.points.push_back(p2);
-                }
-                // Close polygon if first and last points are the same
-                if (tree.coords.size() > 2 && 
-                    tree.coords[0].first == tree.coords.back().first &&
-                    tree.coords[0].second == tree.coords.back().second) {
-                    // Already closed
-                }
-            }
+        for (const auto& pt : path_) {
+            geometry_msgs::msg::Point p;
+            p.x = pt.first;
+            p.y = pt.second;
+            p.z = 0.0;
+            marker.points.push_back(p);
         }
-
         return marker;
     }
 
-    visualization_msgs::msg::Marker OSMVisualizer::createWoodMarker(const std::vector<Geometry2D>& wood) {
-        visualization_msgs::msg::Marker marker;
-        marker.header.frame_id = frame_id_;
-        marker.header.stamp = rclcpp::Time(0);
-        marker.ns = "osm_wood";
-        marker.id = 4;
-        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.5; // Line width (increased for visibility)
-        marker.color.r = 0.0;
-        marker.color.g = 0.4;
-        marker.color.b = 0.0;
-        marker.color.a = 1.0; // Fully opaque for better visibility
-
-        for (const auto& wood_area : wood) {
-            if (wood_area.coords.size() < 3) continue;
-            
-            // Check for NaN or invalid coordinates
-            bool has_invalid = false;
-            for (const auto& coord : wood_area.coords) {
-                if (std::isnan(coord.first) || std::isnan(coord.second) || 
-                    std::isinf(coord.first) || std::isinf(coord.second)) {
-                    has_invalid = true;
-                    break;
-                }
-            }
-            if (has_invalid) {
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping wood polygon with invalid (NaN/Inf) coordinates");
-                continue;
-            }
-            
-            // Create closed polygon
-            for (size_t i = 0; i < wood_area.coords.size(); ++i) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = wood_area.coords[i].first;
-                p1.y = wood_area.coords[i].second;
-                p1.z = 0.0;
-                
-                size_t next_idx = (i + 1) % wood_area.coords.size();
-                p2.x = wood_area.coords[next_idx].first;
-                p2.y = wood_area.coords[next_idx].second;
-                p2.z = 0.0;
-                
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
-            }
-        }
-
-        return marker;
+    void OSMVisualizer::setPath(const std::vector<std::pair<float, float>>& path) {
+        path_ = path;
     }
 
     void OSMVisualizer::publish() {
-        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: publish() called");
+        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: publish() called, buildings_.size()=" << buildings_.size());
         
         if (!pub_) {
             RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Cannot publish - publisher is null!");
@@ -470,40 +315,31 @@ namespace semantic_bki {
         RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher and node are valid, creating marker array");
         visualization_msgs::msg::MarkerArray marker_array;
         
-        int total_points = 0;
         if (!buildings_.empty()) {
             auto marker = createBuildingMarker(buildings_);
-            total_points += marker.points.size();
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << buildings_.size() << " buildings with " << marker.points.size() << " points");
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << buildings_.size() << " buildings with " << marker.points.size() << " line points");
+        } else {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No buildings loaded! buildings_.size()=" << buildings_.size());
         }
+        
         if (!roads_.empty()) {
             auto marker = createRoadMarker(roads_);
-            total_points += marker.points.size();
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << roads_.size() << " roads with " << marker.points.size() << " points");
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << roads_.size() << " roads/sidewalks with " << marker.points.size() << " line points");
+        } else {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No roads loaded! roads_.size()=" << roads_.size());
         }
-        if (!grasslands_.empty()) {
-            auto marker = createGrasslandMarker(grasslands_);
-            total_points += marker.points.size();
+        
+        if (!path_.empty()) {
+            auto marker = createPathMarker();
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << grasslands_.size() << " grasslands with " << marker.points.size() << " points");
-        }
-        if (!trees_.empty()) {
-            auto marker = createTreeMarker(trees_);
-            total_points += marker.points.size();
-            marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << trees_.size() << " trees with " << marker.points.size() << " points");
-        }
-        if (!wood_.empty()) {
-            auto marker = createWoodMarker(wood_);
-            total_points += marker.points.size();
-            marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << wood_.size() << " wood areas with " << marker.points.size() << " points");
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added lidar path with " << path_.size() << " points");
         }
         
         if (marker_array.markers.empty()) {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", wood=" << wood_.size() << ")");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", path=" << path_.size() << ")");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: This means no geometries or path were loaded.");
             return;
         }
         
@@ -517,39 +353,33 @@ namespace semantic_bki {
             marker.header.stamp = rclcpp::Time(0);
         }
         
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Publishing " << marker_array.markers.size() << " markers with " << total_points << " total points to topic " << topic_ << " in frame " << frame_id_);
+        int total_points = 0;
+        for (const auto& m : marker_array.markers) {
+            total_points += m.points.size();
+        }
+        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Publishing " << marker_array.markers.size() << " marker(s) (buildings + roads) with " << total_points << " total line points to topic " << topic_ << " in frame " << frame_id_);
         
-        // Log first marker details for debugging
+        // Log marker details and bounding box for debugging
         if (!marker_array.markers.empty()) {
             const auto& first_marker = marker_array.markers[0];
             RCLCPP_INFO_STREAM(node_->get_logger(), "First marker: ns=" << first_marker.ns << ", id=" << first_marker.id << ", type=" << first_marker.type << ", points=" << first_marker.points.size() << ", frame=" << first_marker.header.frame_id);
+            
+            // Calculate bounding box of marker points
             if (!first_marker.points.empty()) {
+                float min_x = std::numeric_limits<float>::max();
+                float max_x = std::numeric_limits<float>::lowest();
+                float min_y = std::numeric_limits<float>::max();
+                float max_y = std::numeric_limits<float>::lowest();
+                for (const auto& pt : first_marker.points) {
+                    min_x = std::min(min_x, static_cast<float>(pt.x));
+                    max_x = std::max(max_x, static_cast<float>(pt.x));
+                    min_y = std::min(min_y, static_cast<float>(pt.y));
+                    max_y = std::max(max_y, static_cast<float>(pt.y));
+                }
+                RCLCPP_INFO_STREAM(node_->get_logger(), "Marker bounds: X=[" << min_x << ", " << max_x << "], Y=[" << min_y << ", " << max_y << "]");
                 RCLCPP_INFO_STREAM(node_->get_logger(), "First point: [" << first_marker.points[0].x << ", " << first_marker.points[0].y << ", " << first_marker.points[0].z << "]");
             }
         }
-        
-        // TEST: Add a simple cube marker to verify publisher works
-        visualization_msgs::msg::Marker test_marker;
-        test_marker.header.frame_id = "map";
-        test_marker.header.stamp = rclcpp::Time(0);
-        test_marker.ns = "test";
-        test_marker.id = 999;
-        test_marker.type = visualization_msgs::msg::Marker::CUBE;
-        test_marker.action = visualization_msgs::msg::Marker::ADD;
-        test_marker.pose.position.x = 0.0;
-        test_marker.pose.position.y = 0.0;
-        test_marker.pose.position.z = 0.0;
-        test_marker.pose.orientation.w = 1.0;
-        test_marker.scale.x = 5.0;
-        test_marker.scale.y = 5.0;
-        test_marker.scale.z = 5.0;
-        test_marker.color.r = 1.0;
-        test_marker.color.g = 0.0;
-        test_marker.color.b = 0.0;
-        test_marker.color.a = 1.0;
-        test_marker.lifetime = rclcpp::Duration(0, 0);
-        marker_array.markers.push_back(test_marker);
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Added test cube marker (id=999) at origin");
         
         RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: About to publish MarkerArray with " << marker_array.markers.size() << " markers");
         RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Publisher valid: " << (pub_ ? "YES" : "NO"));
@@ -568,31 +398,70 @@ namespace semantic_bki {
             RCLCPP_WARN(node_->get_logger(), "OSMVisualizer: Invalid publishing rate, using default 1.0 Hz");
             rate = 1.0;
         }
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Creating timer for periodic publishing at " << rate << " Hz");
+        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Creating timer for periodic publishing at " << rate << " Hz");
+        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Node pointer: " << node_.get() << ", this pointer: " << this);
+        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Publisher pointer: " << pub_.get() << ", Publisher count: " << pub_.use_count());
+        
         publish_timer_ = node_->create_wall_timer(
             std::chrono::milliseconds(static_cast<int>(1000.0 / rate)),
-            std::bind(&OSMVisualizer::timerCallback, this));
+            [this]() {
+                this->timerCallback();
+            });
         if (!publish_timer_) {
             RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Failed to create publishing timer!");
         } else {
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Started periodic publishing at " << rate << " Hz");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer created successfully, periodic publishing started at " << rate << " Hz");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer will fire every " << (1000.0 / rate) << " ms");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer pointer: " << publish_timer_.get() << ", Timer count: " << publish_timer_.use_count());
         }
     }
 
     void OSMVisualizer::timerCallback() {
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers");
-        publish();
+        try {
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ")");
+            if (!node_) {
+                RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - node_ is null!");
+                return;
+            }
+            if (!pub_) {
+                RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - pub_ is null!");
+                return;
+            }
+            if (!publish_timer_) {
+                RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - publish_timer_ is null!");
+                return;
+            }
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: About to call publish(), pub_ count: " << pub_.use_count());
+            publish();
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback completed successfully, markers published");
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR_STREAM(node_->get_logger(), "OSMVisualizer: Exception in timer callback: " << e.what());
+        } catch (...) {
+            RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Unknown exception in timer callback!");
+        }
     }
 
     void OSMVisualizer::transformToFirstPoseOrigin(const Eigen::Matrix4d& first_pose) {
+        // Prevent multiple transformations
+        if (transformed_) {
+            RCLCPP_WARN(node_->get_logger(), "OSM data has already been transformed. Skipping additional transformation to prevent double transformation.");
+            return;
+        }
+        
+        // Same as BKISemanticMapping_ROS1_ORIG: OSM coordinates are "relative to origin_latlon" (East, North in meters).
+        // Binary / Python use: world = first_pose_position + relative; then map = first_pose_inverse * world.
+        // So we first add first_pose translation to get world coords, then apply first_pose_inverse.
         Eigen::Matrix4d first_pose_inverse = first_pose.inverse();
         
-        RCLCPP_INFO_STREAM(node_->get_logger(), "Transforming OSM geometries to be relative to first pose...");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "Transforming OSM geometries to be relative to first pose (same as ROS1_ORIG)...");
         RCLCPP_INFO_STREAM(node_->get_logger(), "First pose translation: [" << first_pose(0,3) << ", " << first_pose(1,3) << ", " << first_pose(2,3) << "]");
-        RCLCPP_INFO_STREAM(node_->get_logger(), "Applying full pose transformation (rotation + translation) to match scans/map");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "Step 1: local_to_world = point + first_pose_translation; Step 2: map = first_pose_inverse * world");
         
-        auto transformPoint = [&first_pose_inverse](float& x, float& y) {
-            Eigen::Vector4d point(x, y, 0.0, 1.0);
+        auto transformPoint = [&first_pose, &first_pose_inverse](float& x, float& y) {
+            // Local (relative to origin_latlon) -> world: add first pose translation (as in create_scan_osm_topdown.py)
+            double world_x = x + first_pose(0, 3);
+            double world_y = y + first_pose(1, 3);
+            Eigen::Vector4d point(world_x, world_y, 0.0, 1.0);
             Eigen::Vector4d transformed = first_pose_inverse * point;
             x = static_cast<float>(transformed(0));
             y = static_cast<float>(transformed(1));
@@ -603,27 +472,183 @@ namespace semantic_bki {
                 transformPoint(coord.first, coord.second);
             }
         }
+        
+        // Transform roads as well
         for (auto& road : roads_) {
             for (auto& coord : road.coords) {
                 transformPoint(coord.first, coord.second);
             }
         }
-        for (auto& grassland : grasslands_) {
-            for (auto& coord : grassland.coords) {
-                transformPoint(coord.first, coord.second);
+        
+        // Log bounding box after transformation
+        if (!buildings_.empty() || !roads_.empty()) {
+            float min_x_after = std::numeric_limits<float>::max();
+            float max_x_after = std::numeric_limits<float>::lowest();
+            float min_y_after = std::numeric_limits<float>::max();
+            float max_y_after = std::numeric_limits<float>::lowest();
+            for (const auto& building : buildings_) {
+                for (const auto& coord : building.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
+            for (const auto& road : roads_) {
+                for (const auto& coord : road.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries AFTER transform - Bounds: [" << min_x_after << ", " << min_y_after << "] to [" << max_x_after << ", " << max_y_after << "]");
+        }
+        
+        // Mark as transformed to prevent multiple transformations
+        transformed_ = true;
+        
+        RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries (buildings + roads) transformed to first pose origin frame.");
+    }
+
+    bool OSMVisualizer::saveAsPNG(const std::string& output_path, int image_width, int image_height, int margin_pixels) {
+        if (buildings_.empty() && roads_.empty() && path_.empty()) {
+            RCLCPP_WARN(node_->get_logger(), "No buildings, roads, or path to render in PNG");
+            return false;
+        }
+
+        // Find bounding box of all buildings and roads
+        float min_x = std::numeric_limits<float>::max();
+        float max_x = std::numeric_limits<float>::lowest();
+        float min_y = std::numeric_limits<float>::max();
+        float max_y = std::numeric_limits<float>::lowest();
+
+        for (const auto& building : buildings_) {
+            for (const auto& coord : building.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
             }
         }
-        for (auto& tree : trees_) {
-            for (auto& coord : tree.coords) {
-                transformPoint(coord.first, coord.second);
+        
+        for (const auto& road : roads_) {
+            for (const auto& coord : road.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
             }
         }
-        for (auto& wood_area : wood_) {
-            for (auto& coord : wood_area.coords) {
-                transformPoint(coord.first, coord.second);
+        
+        for (const auto& pt : path_) {
+            min_x = std::min(min_x, pt.first);
+            max_x = std::max(max_x, pt.first);
+            min_y = std::min(min_y, pt.second);
+            max_y = std::max(max_y, pt.second);
+        }
+
+        if (min_x >= max_x || min_y >= max_y) {
+            RCLCPP_ERROR(node_->get_logger(), "Invalid bounding box for OSM geometries");
+            return false;
+        }
+
+        // Calculate scale and offset to fit all geometries in image
+        float range_x = max_x - min_x;
+        float range_y = max_y - min_y;
+        float scale = std::min(
+            (image_width - 2 * margin_pixels) / range_x,
+            (image_height - 2 * margin_pixels) / range_y
+        );
+
+        float offset_x = margin_pixels - min_x * scale;
+        float offset_y = margin_pixels - min_y * scale;
+
+        // Create white background image
+        cv::Mat image = cv::Mat::ones(image_height, image_width, CV_8UC3) * 255;
+
+        // Draw lidar path (green) first so it appears behind other layers
+        if (path_.size() >= 2) {
+            cv::Scalar path_color(0, 255, 0); // Green (BGR)
+            for (size_t i = 0; i < path_.size() - 1; ++i) {
+                int px1 = static_cast<int>(path_[i].first * scale + offset_x);
+                int py1 = static_cast<int>(path_[i].second * scale + offset_y);
+                py1 = image_height - py1;
+                int px2 = static_cast<int>(path_[i + 1].first * scale + offset_x);
+                int py2 = static_cast<int>(path_[i + 1].second * scale + offset_y);
+                py2 = image_height - py2;
+                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), path_color, 2);
             }
         }
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries transformed to first pose origin frame.");
+
+        // Draw roads (red)
+        cv::Scalar road_color(0, 0, 255); // Red color (BGR format)
+        for (const auto& road : roads_) {
+            if (road.coords.size() < 2) continue;
+            
+            // Convert road coordinates to image coordinates and draw polyline
+            for (size_t i = 0; i < road.coords.size() - 1; ++i) {
+                int px1 = static_cast<int>(road.coords[i].first * scale + offset_x);
+                int py1 = static_cast<int>(road.coords[i].second * scale + offset_y);
+                py1 = image_height - py1; // Flip Y axis
+                
+                int px2 = static_cast<int>(road.coords[i + 1].first * scale + offset_x);
+                int py2 = static_cast<int>(road.coords[i + 1].second * scale + offset_y);
+                py2 = image_height - py2; // Flip Y axis
+                
+                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), road_color, 2);
+            }
+        }
+
+        // Draw buildings
+        cv::Scalar building_color(77, 77, 204); // Blue color (BGR format)
+        cv::Scalar building_outline(0, 0, 255); // Red outline for visibility
+
+        for (const auto& building : buildings_) {
+            if (building.coords.size() < 3) continue;
+
+            // Convert building coordinates to image coordinates
+            std::vector<cv::Point> points;
+            for (const auto& coord : building.coords) {
+                int px = static_cast<int>(coord.first * scale + offset_x);
+                int py = static_cast<int>(coord.second * scale + offset_y);
+                // Flip Y axis (image coordinates have origin at top-left)
+                py = image_height - py;
+                points.push_back(cv::Point(px, py));
+            }
+
+            // Fill polygon
+            if (points.size() >= 3) {
+                const cv::Point* pts = &points[0];
+                int npts = static_cast<int>(points.size());
+                cv::fillPoly(image, &pts, &npts, 1, building_color);
+
+                // Draw outline
+                for (size_t i = 0; i < points.size(); ++i) {
+                    size_t next_i = (i + 1) % points.size();
+                    cv::line(image, points[i], points[next_i], building_outline, 2);
+                }
+            }
+        }
+
+        // Add coordinate info as text
+        std::stringstream info;
+        info << "Buildings: " << buildings_.size() << " | Roads: " << roads_.size() << " | Path: " << path_.size() << " pts | ";
+        info << "Bounds: [" << min_x << ", " << min_y << "] to [" << max_x << ", " << max_y << "]";
+        cv::putText(image, info.str(), cv::Point(10, 30), 
+                   cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 0), 2);
+
+        // Save image
+        bool success = cv::imwrite(output_path, image);
+        if (success) {
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Saved OSM visualization to: " << output_path);
+            RCLCPP_INFO_STREAM(node_->get_logger(), "  Image size: " << image_width << "x" << image_height);
+            RCLCPP_INFO_STREAM(node_->get_logger(), "  Buildings rendered: " << buildings_.size() << ", Roads rendered: " << roads_.size());
+        } else {
+            RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to save PNG image to: " << output_path);
+        }
+
+        return success;
     }
 
 } // namespace semantic_bki
