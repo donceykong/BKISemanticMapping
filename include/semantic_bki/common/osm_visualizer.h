@@ -93,6 +93,21 @@ namespace semantic_bki {
          */
         visualization_msgs::msg::Marker createPathMarker() const;
 
+        /**
+         * Create Marker message for grasslands (greenish polygon outlines).
+         */
+        visualization_msgs::msg::Marker createGrasslandMarker(const std::vector<Geometry2D>& grasslands);
+
+        /**
+         * Create Marker message for trees/forest (dark green polygon outlines).
+         */
+        visualization_msgs::msg::Marker createTreeMarker(const std::vector<Geometry2D>& trees);
+
+        /**
+         * Create Marker message for tree points (single-node trees as spheres).
+         */
+        visualization_msgs::msg::Marker createTreePointsMarker() const;
+
         rclcpp::Node::SharedPtr node_;
         rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_;
         rclcpp::TimerBase::SharedPtr publish_timer_;
@@ -101,6 +116,9 @@ namespace semantic_bki {
 
         std::vector<Geometry2D> buildings_;
         std::vector<Geometry2D> roads_;
+        std::vector<Geometry2D> grasslands_;
+        std::vector<Geometry2D> trees_;           // Forest/wood polygons
+        std::vector<std::pair<float, float>> tree_points_;  // Single-point trees (natural=tree nodes)
         std::vector<std::pair<float, float>> path_;  // Lidar trajectory for debugging
 
         bool transformed_; // Flag to track if data has already been transformed

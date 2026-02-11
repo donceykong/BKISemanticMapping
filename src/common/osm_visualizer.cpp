@@ -19,16 +19,36 @@
 #include <osmium/osm/location.hpp>
 
 namespace {
-    // Handler class for extracting buildings, roads, and sidewalks from OSM data using libosmium
+    // Handler class for extracting buildings, roads, sidewalks, grasslands, trees (ways + nodes) from OSM data using libosmium
     class OSMGeometryHandler : public osmium::handler::Handler {
     public:
-        OSMGeometryHandler(double origin_lat, double origin_lon, 
+        OSMGeometryHandler(double origin_lat, double origin_lon,
                           std::vector<semantic_bki::Geometry2D>& buildings,
-                          std::vector<semantic_bki::Geometry2D>& roads)
-            : origin_lat_(origin_lat), origin_lon_(origin_lon), 
-              buildings_(buildings), roads_(roads) {
+                          std::vector<semantic_bki::Geometry2D>& roads,
+                          std::vector<semantic_bki::Geometry2D>& grasslands,
+                          std::vector<semantic_bki::Geometry2D>& trees,
+                          std::vector<std::pair<float, float>>& tree_points)
+            : origin_lat_(origin_lat), origin_lon_(origin_lon),
+              buildings_(buildings), roads_(roads), grasslands_(grasslands), trees_(trees), tree_points_(tree_points) {
             kMetersPerDegLat_ = 110540.0;
             kMetersPerDegLon_ = 111320.0 * std::cos(origin_lat * M_PI / 180.0);
+        }
+
+        void node(const osmium::Node& node) {
+            // Single-point trees: natural=tree (node with one coordinate)
+            const char* natural_tag = node.tags()["natural"];
+            if (!natural_tag || std::string(natural_tag) != "tree") {
+                return;
+            }
+            const osmium::Location& loc = node.location();
+            if (!loc.valid()) {
+                return;
+            }
+            double lat = loc.lat();
+            double lon = loc.lon();
+            float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
+            float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
+            tree_points_.push_back({x, y});
         }
 
         void way(const osmium::Way& way) {
@@ -47,13 +67,12 @@ namespace {
             }
 
             if (geom.coords.size() < 2) {
-                return; // Need at least 2 points
+                return;
             }
 
             // Check if this way is a building
             const char* building_tag = way.tags()["building"];
             if (building_tag) {
-                // Only add if we have at least 3 points (valid polygon)
                 if (geom.coords.size() >= 3) {
                     buildings_.push_back(geom);
                 }
@@ -63,10 +82,9 @@ namespace {
             // Check if this way is a road or sidewalk
             const char* highway_tag = way.tags()["highway"];
             if (highway_tag) {
-                // Include various road types and pedestrian paths
                 std::string highway(highway_tag);
-                if (highway == "motorway" || highway == "trunk" || highway == "primary" || 
-                    highway == "secondary" || highway == "tertiary" || 
+                if (highway == "motorway" || highway == "trunk" || highway == "primary" ||
+                    highway == "secondary" || highway == "tertiary" ||
                     highway == "unclassified" || highway == "residential" ||
                     highway == "motorway_link" || highway == "trunk_link" ||
                     highway == "primary_link" || highway == "secondary_link" ||
@@ -79,11 +97,44 @@ namespace {
                 return;
             }
 
-            // Check for sidewalks (footway=sidewalk or highway=footway with footway=sidewalk)
             const char* footway_tag = way.tags()["footway"];
             if (footway_tag && std::string(footway_tag) == "sidewalk") {
                 roads_.push_back(geom);
                 return;
+            }
+
+            // Grassland: landuse=grass, natural=grassland, landuse=meadow, landuse=greenfield
+            const char* landuse_tag = way.tags()["landuse"];
+            if (landuse_tag) {
+                std::string landuse(landuse_tag);
+                if (landuse == "grass" || landuse == "meadow" || landuse == "greenfield") {
+                    if (geom.coords.size() >= 3) {
+                        grasslands_.push_back(geom);
+                    }
+                    return;
+                }
+            }
+            const char* natural_tag = way.tags()["natural"];
+            if (natural_tag) {
+                std::string natural(natural_tag);
+                if (natural == "grassland" || natural == "heath" || natural == "scrub") {
+                    if (geom.coords.size() >= 3) {
+                        grasslands_.push_back(geom);
+                    }
+                    return;
+                }
+                // Trees/forest: natural=wood, or landuse=forest
+                if (natural == "wood" || natural == "forest") {
+                    if (geom.coords.size() >= 3) {
+                        trees_.push_back(geom);
+                    }
+                    return;
+                }
+            }
+            if (landuse_tag && std::string(landuse_tag) == "forest") {
+                if (geom.coords.size() >= 3) {
+                    trees_.push_back(geom);
+                }
             }
         }
 
@@ -92,6 +143,9 @@ namespace {
         double kMetersPerDegLat_, kMetersPerDegLon_;
         std::vector<semantic_bki::Geometry2D>& buildings_;
         std::vector<semantic_bki::Geometry2D>& roads_;
+        std::vector<semantic_bki::Geometry2D>& grasslands_;
+        std::vector<semantic_bki::Geometry2D>& trees_;
+        std::vector<std::pair<float, float>>& tree_points_;
     };
 }
 
@@ -123,6 +177,9 @@ namespace semantic_bki {
     bool OSMVisualizer::loadFromOSM(const std::string& osm_file, double origin_lat, double origin_lon) {
         buildings_.clear();
         roads_.clear();
+        grasslands_.clear();
+        trees_.clear();
+        tree_points_.clear();
         
         RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer::loadFromOSM called with file: " << osm_file);
         RCLCPP_INFO_STREAM(node_->get_logger(), "  Origin: (" << origin_lat << ", " << origin_lon << ")");
@@ -138,24 +195,25 @@ namespace semantic_bki {
             osmium::handler::NodeLocationsForWays<osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>> 
                 location_handler(index);
             
-            // Create handler to extract buildings, roads, and sidewalks
-            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_);
+            // Create handler to extract buildings, roads, sidewalks, grasslands, trees (ways + point trees)
+            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_, grasslands_, trees_, tree_points_);
             
             // Apply handlers: first store node locations, then process ways
             osmium::apply(reader, location_handler, handler);
             reader.close();
             
-            RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings and " << roads_.size() << " roads/sidewalks from OSM file using libosmium");
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings, " << roads_.size() << " roads/sidewalks, " << grasslands_.size() << " grasslands, " << trees_.size() << " tree/forest polygons, " << tree_points_.size() << " tree points from OSM file using libosmium");
             
-            if (buildings_.empty() && roads_.empty()) {
-                RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings or roads found in OSM file! Check if file contains building or highway tags.");
+            if (buildings_.empty() && roads_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
+                RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings, roads, grasslands, or trees found in OSM file.");
             }
             
-            size_t total_building_points = 0;
+            size_t total_building_points = 0, total_road_points = 0, total_grass_points = 0, total_tree_points = 0;
             for (const auto& b : buildings_) total_building_points += b.coords.size();
-            size_t total_road_points = 0;
             for (const auto& r : roads_) total_road_points += r.coords.size();
-            RCLCPP_INFO_STREAM(node_->get_logger(), "Total building points: " << total_building_points << ", Total road points: " << total_road_points);
+            for (const auto& g : grasslands_) total_grass_points += g.coords.size();
+            for (const auto& t : trees_) total_tree_points += t.coords.size();
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Total points - buildings: " << total_building_points << ", roads: " << total_road_points << ", grasslands: " << total_grass_points << ", tree polygons: " << total_tree_points << ", tree points: " << tree_points_.size());
             
             return true;
         } catch (const std::exception& e) {
@@ -299,6 +357,115 @@ namespace semantic_bki {
         path_ = path;
     }
 
+    visualization_msgs::msg::Marker OSMVisualizer::createGrasslandMarker(const std::vector<Geometry2D>& grasslands) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_grasslands";
+        marker.id = 3;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.25;
+        marker.color.r = 0.4f;
+        marker.color.g = 0.85f;
+        marker.color.b = 0.35f;
+        marker.color.a = 0.7f;
+
+        for (const auto& grassland : grasslands) {
+            if (grassland.coords.size() < 3) continue;
+            bool has_invalid = false;
+            for (const auto& coord : grassland.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) || std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+            for (size_t i = 0; i < grassland.coords.size(); ++i) {
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = grassland.coords[i].first;
+                p1.y = grassland.coords[i].second;
+                p1.z = 0.0;
+                size_t next_idx = (i + 1) % grassland.coords.size();
+                p2.x = grassland.coords[next_idx].first;
+                p2.y = grassland.coords[next_idx].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        }
+        return marker;
+    }
+
+    visualization_msgs::msg::Marker OSMVisualizer::createTreeMarker(const std::vector<Geometry2D>& trees) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_trees";
+        marker.id = 4;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.3;
+        marker.color.r = 0.1f;
+        marker.color.g = 0.5f;
+        marker.color.b = 0.2f;
+        marker.color.a = 0.9f;
+
+        for (const auto& tree : trees) {
+            if (tree.coords.size() < 3) continue;
+            bool has_invalid = false;
+            for (const auto& coord : tree.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) || std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+            for (size_t i = 0; i < tree.coords.size(); ++i) {
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = tree.coords[i].first;
+                p1.y = tree.coords[i].second;
+                p1.z = 0.0;
+                size_t next_idx = (i + 1) % tree.coords.size();
+                p2.x = tree.coords[next_idx].first;
+                p2.y = tree.coords[next_idx].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        }
+        return marker;
+    }
+
+    visualization_msgs::msg::Marker OSMVisualizer::createTreePointsMarker() const {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_tree_points";
+        marker.id = 5;
+        marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 10.0;  // sphere diameter in meters (10x for visibility)
+        marker.scale.y = 10.0;
+        marker.scale.z = 10.0;
+        marker.color.r = 0.1f;
+        marker.color.g = 0.5f;
+        marker.color.b = 0.2f;
+        marker.color.a = 0.9f;
+        for (const auto& pt : tree_points_) {
+            if (std::isnan(pt.first) || std::isnan(pt.second) || std::isinf(pt.first) || std::isinf(pt.second)) continue;
+            geometry_msgs::msg::Point p;
+            p.x = pt.first;
+            p.y = pt.second;
+            p.z = 0.0;
+            marker.points.push_back(p);
+        }
+        return marker;
+    }
+
     void OSMVisualizer::publish() {
         RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: publish() called, buildings_.size()=" << buildings_.size());
         
@@ -331,6 +498,23 @@ namespace semantic_bki {
             RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No roads loaded! roads_.size()=" << roads_.size());
         }
         
+        if (!grasslands_.empty()) {
+            auto marker = createGrasslandMarker(grasslands_);
+            marker_array.markers.push_back(marker);
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << grasslands_.size() << " grasslands with " << marker.points.size() << " line points");
+        }
+        
+        if (!trees_.empty()) {
+            auto marker = createTreeMarker(trees_);
+            marker_array.markers.push_back(marker);
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << trees_.size() << " trees/forests with " << marker.points.size() << " line points");
+        }
+        if (!tree_points_.empty()) {
+            auto marker = createTreePointsMarker();
+            marker_array.markers.push_back(marker);
+            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << tree_points_.size() << " tree points (single-node trees)");
+        }
+        
         if (!path_.empty()) {
             auto marker = createPathMarker();
             marker_array.markers.push_back(marker);
@@ -338,8 +522,7 @@ namespace semantic_bki {
         }
         
         if (marker_array.markers.empty()) {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", path=" << path_.size() << ")");
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: This means no geometries or path were loaded.");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ", path=" << path_.size() << ")");
             return;
         }
         
@@ -418,7 +601,7 @@ namespace semantic_bki {
 
     void OSMVisualizer::timerCallback() {
         try {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ")");
+            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
             if (!node_) {
                 RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - node_ is null!");
                 return;
@@ -473,11 +656,26 @@ namespace semantic_bki {
             }
         }
         
-        // Transform roads as well
+        // Transform roads
         for (auto& road : roads_) {
             for (auto& coord : road.coords) {
                 transformPoint(coord.first, coord.second);
             }
+        }
+        
+        // Transform grasslands and trees
+        for (auto& grassland : grasslands_) {
+            for (auto& coord : grassland.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
+        for (auto& tree : trees_) {
+            for (auto& coord : tree.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
+        for (auto& pt : tree_points_) {
+            transformPoint(pt.first, pt.second);
         }
         
         // Log bounding box after transformation
@@ -502,18 +700,33 @@ namespace semantic_bki {
                     max_y_after = std::max(max_y_after, coord.second);
                 }
             }
+            for (const auto& g : grasslands_) {
+                for (const auto& coord : g.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
+            for (const auto& t : trees_) {
+                for (const auto& coord : t.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
             RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries AFTER transform - Bounds: [" << min_x_after << ", " << min_y_after << "] to [" << max_x_after << ", " << max_y_after << "]");
         }
         
-        // Mark as transformed to prevent multiple transformations
         transformed_ = true;
         
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries (buildings + roads) transformed to first pose origin frame.");
+        RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries (buildings, roads, grasslands, trees) transformed to first pose origin frame.");
     }
 
     bool OSMVisualizer::saveAsPNG(const std::string& output_path, int image_width, int image_height, int margin_pixels) {
-        if (buildings_.empty() && roads_.empty() && path_.empty()) {
-            RCLCPP_WARN(node_->get_logger(), "No buildings, roads, or path to render in PNG");
+        if (buildings_.empty() && roads_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty() && path_.empty()) {
+            RCLCPP_WARN(node_->get_logger(), "No buildings, roads, grasslands, trees, tree points, or path to render in PNG");
             return false;
         }
 
@@ -540,7 +753,28 @@ namespace semantic_bki {
                 max_y = std::max(max_y, coord.second);
             }
         }
-        
+        for (const auto& g : grasslands_) {
+            for (const auto& coord : g.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
+            }
+        }
+        for (const auto& t : trees_) {
+            for (const auto& coord : t.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
+            }
+        }
+        for (const auto& pt : tree_points_) {
+            min_x = std::min(min_x, pt.first);
+            max_x = std::max(max_x, pt.first);
+            min_y = std::min(min_y, pt.second);
+            max_y = std::max(max_y, pt.second);
+        }
         for (const auto& pt : path_) {
             min_x = std::min(min_x, pt.first);
             max_x = std::max(max_x, pt.first);
@@ -567,7 +801,7 @@ namespace semantic_bki {
         // Create white background image
         cv::Mat image = cv::Mat::ones(image_height, image_width, CV_8UC3) * 255;
 
-        // Draw lidar path (green) first so it appears behind other layers
+        // Draw lidar path (green) first
         if (path_.size() >= 2) {
             cv::Scalar path_color(0, 255, 0); // Green (BGR)
             for (size_t i = 0; i < path_.size() - 1; ++i) {
@@ -579,6 +813,49 @@ namespace semantic_bki {
                 py2 = image_height - py2;
                 cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), path_color, 2);
             }
+        }
+
+        // Draw grasslands (light green outlines)
+        cv::Scalar grassland_color(90, 217, 90); // BGR light green
+        for (const auto& grassland : grasslands_) {
+            if (grassland.coords.size() < 3) continue;
+            std::vector<cv::Point> points;
+            for (const auto& coord : grassland.coords) {
+                int px = static_cast<int>(coord.first * scale + offset_x);
+                int py = static_cast<int>(coord.second * scale + offset_y);
+                py = image_height - py;
+                points.push_back(cv::Point(px, py));
+            }
+            for (size_t i = 0; i < points.size(); ++i) {
+                size_t next_i = (i + 1) % points.size();
+                cv::line(image, points[i], points[next_i], grassland_color, 2);
+            }
+        }
+
+        // Draw trees/forest (dark green outlines)
+        cv::Scalar tree_color(51, 128, 26); // BGR dark green
+        for (const auto& tree : trees_) {
+            if (tree.coords.size() < 3) continue;
+            std::vector<cv::Point> points;
+            for (const auto& coord : tree.coords) {
+                int px = static_cast<int>(coord.first * scale + offset_x);
+                int py = static_cast<int>(coord.second * scale + offset_y);
+                py = image_height - py;
+                points.push_back(cv::Point(px, py));
+            }
+            for (size_t i = 0; i < points.size(); ++i) {
+                size_t next_i = (i + 1) % points.size();
+                cv::line(image, points[i], points[next_i], tree_color, 2);
+            }
+        }
+        // Draw single-point trees (natural=tree nodes) as small circles
+        const int tree_point_radius = std::max(2, static_cast<int>(30.0 * scale));  // ~30m in world (10x), at least 2px
+        for (const auto& pt : tree_points_) {
+            if (std::isnan(pt.first) || std::isnan(pt.second)) continue;
+            int px = static_cast<int>(pt.first * scale + offset_x);
+            int py = static_cast<int>(pt.second * scale + offset_y);
+            py = image_height - py;
+            cv::circle(image, cv::Point(px, py), tree_point_radius, tree_color, -1);
         }
 
         // Draw roads (red)
@@ -633,7 +910,7 @@ namespace semantic_bki {
 
         // Add coordinate info as text
         std::stringstream info;
-        info << "Buildings: " << buildings_.size() << " | Roads: " << roads_.size() << " | Path: " << path_.size() << " pts | ";
+        info << "B:" << buildings_.size() << " R:" << roads_.size() << " G:" << grasslands_.size() << " T:" << trees_.size() << " TP:" << tree_points_.size() << " P:" << path_.size() << " | ";
         info << "Bounds: [" << min_x << ", " << min_y << "] to [" << max_x << ", " << max_y << "]";
         cv::putText(image, info.str(), cv::Point(10, 30), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 0), 2);
@@ -643,7 +920,7 @@ namespace semantic_bki {
         if (success) {
             RCLCPP_INFO_STREAM(node_->get_logger(), "Saved OSM visualization to: " << output_path);
             RCLCPP_INFO_STREAM(node_->get_logger(), "  Image size: " << image_width << "x" << image_height);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "  Buildings rendered: " << buildings_.size() << ", Roads rendered: " << roads_.size());
+            RCLCPP_INFO_STREAM(node_->get_logger(), "  Buildings: " << buildings_.size() << ", Roads: " << roads_.size() << ", Grasslands: " << grasslands_.size() << ", Trees: " << trees_.size());
         } else {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to save PNG image to: " << output_path);
         }
