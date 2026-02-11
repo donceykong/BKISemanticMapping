@@ -17,9 +17,9 @@
 
     # Dataset information
     input_data_prefix: lidar_bin/data
-    input_label_prefix: inferred_labels
+    input_label_prefix: gt_labels
     lidar_pose_file: pose_inW.csv
-    gt_label_prefix: inferred_labels
+    gt_label_prefix: gt_labels
     evaluation_result_prefix: evaluations/
     query: true
     visualize: true
