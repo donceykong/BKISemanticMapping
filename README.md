@@ -1,3 +1,5 @@
+This repository contains Lu Gan's original work, adapted for ROS2.
+
 # BKISemanticMapping
 Bayesian Spatial Kernel Smoothing for Scalable Dense Semantic Mapping
 
