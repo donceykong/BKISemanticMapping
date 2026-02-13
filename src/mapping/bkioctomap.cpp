@@ -39,7 +39,8 @@ namespace semantic_bki {
                         float free_thresh,
                         float occupied_thresh)
             : resolution(resolution), block_depth(block_depth),
-              block_size((float) pow(2, block_depth - 1) * resolution) {
+              block_size((float) pow(2, block_depth - 1) * resolution),
+              osm_decay_meters_(2.0f) {
         Block::resolution = resolution;
         Block::size = this->block_size;
         Block::key_loc_map = init_key_loc_map(resolution, block_depth);
@@ -205,6 +206,11 @@ namespace semantic_bki {
 
                 // Only need to update if kernel density total kernel density est > 0
                 node.update(ybars[j]);
+                point3f loc = block->get_loc(leaf_it);
+                node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
+                node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
+                node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
+                node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
             }
 
         }
@@ -220,6 +226,88 @@ namespace semantic_bki {
         rtree.RemoveAll();
     }
 
+    void SemanticBKIOctoMap::set_osm_buildings(const std::vector<Geometry2D> &buildings) {
+        osm_buildings_ = buildings;
+    }
+
+    void SemanticBKIOctoMap::set_osm_roads(const std::vector<Geometry2D> &roads) {
+        osm_roads_ = roads;
+    }
+
+    void SemanticBKIOctoMap::set_osm_grasslands(const std::vector<Geometry2D> &grasslands) {
+        osm_grasslands_ = grasslands;
+    }
+
+    void SemanticBKIOctoMap::set_osm_trees(const std::vector<Geometry2D> &trees) {
+        osm_trees_ = trees;
+    }
+
+    void SemanticBKIOctoMap::set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points) {
+        osm_tree_points_ = tree_points;
+    }
+
+    void SemanticBKIOctoMap::set_osm_decay_meters(float decay_m) {
+        osm_decay_meters_ = decay_m;
+    }
+
+    float SemanticBKIOctoMap::compute_osm_building_prior(float x, float y) const {
+        if (osm_buildings_.empty()) return 0.f;
+        float min_positive_d = std::numeric_limits<float>::max();
+        for (const auto &poly : osm_buildings_) {
+            float signed_d = distance_to_polygon_boundary(x, y, poly);
+            if (signed_d <= 0.f) return 1.f;  // inside a building
+            if (signed_d < min_positive_d) min_positive_d = signed_d;
+        }
+        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+    }
+
+    float SemanticBKIOctoMap::compute_osm_road_prior(float x, float y) const {
+        if (osm_roads_.empty()) return 0.f;
+        float min_d = std::numeric_limits<float>::max();
+        for (const auto &road : osm_roads_) {
+            float d = distance_to_polyline(x, y, road);
+            if (d < min_d) min_d = d;
+        }
+        return osm_prior_from_distance(min_d, osm_decay_meters_);
+    }
+
+    float SemanticBKIOctoMap::compute_osm_grassland_prior(float x, float y) const {
+        if (osm_grasslands_.empty()) return 0.f;
+        float min_positive_d = std::numeric_limits<float>::max();
+        for (const auto &poly : osm_grasslands_) {
+            float signed_d = distance_to_polygon_boundary(x, y, poly);
+            if (signed_d <= 0.f) return 1.f;  // inside grassland
+            if (signed_d < min_positive_d) min_positive_d = signed_d;
+        }
+        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+    }
+
+    float SemanticBKIOctoMap::compute_osm_tree_prior(float x, float y) const {
+        float max_prior = 0.f;
+        // Check tree polygons (forests/woods)
+        if (!osm_trees_.empty()) {
+            float min_positive_d = std::numeric_limits<float>::max();
+            for (const auto &poly : osm_trees_) {
+                float signed_d = distance_to_polygon_boundary(x, y, poly);
+                if (signed_d <= 0.f) {
+                    max_prior = 1.f;  // inside forest, max prior
+                    break;
+                }
+                if (signed_d < min_positive_d) min_positive_d = signed_d;
+            }
+            if (max_prior < 1.f) {
+                float poly_prior = osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+                if (poly_prior > max_prior) max_prior = poly_prior;
+            }
+        }
+        // Check tree points (single trees)
+        if (!osm_tree_points_.empty()) {
+            float d = distance_to_points(x, y, osm_tree_points_);
+            float point_prior = osm_prior_from_distance(d, osm_decay_meters_);
+            if (point_prior > max_prior) max_prior = point_prior;
+        }
+        return max_prior;
+    }
 
     void SemanticBKIOctoMap::insert_pointcloud(const PCLPointCloud &cloud, const point3f &origin, float ds_resolution,
                                       float free_res, float max_range) {
@@ -341,6 +429,11 @@ namespace semantic_bki {
                     // Only need to update if kernel density total kernel density est > 0
                     //if (kbar[j] > 0.0)
                     node.update(ybars[j]);
+                    point3f loc = block->get_loc(leaf_it);
+                    node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
+                    node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
+                    node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
+                    node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
                 }
             }
         }

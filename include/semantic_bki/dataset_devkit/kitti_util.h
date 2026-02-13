@@ -1,6 +1,8 @@
 #pragma once
 
 #include <fstream>
+#include <iostream>
+#include <sstream>
 
 #include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
@@ -79,7 +81,7 @@ class KITTIData {
         }
         return true;
      } else {
-       ROS_ERROR_STREAM("Cannot open camera pose file " << camera_pose_name);
+       std::cerr << "ERROR: Cannot open camera pose file " << camera_pose_name << std::endl;
        return false;
      }
     }
@@ -108,7 +110,7 @@ class KITTIData {
           evaluation_list_(c) = evaluation_list_v[c];
         return true;
       } else {
-        ROS_ERROR_STREAM("Cannot open evaluation list file " << evaluation_list_name);
+        std::cerr << "ERROR: Cannot open evaluation list file " << evaluation_list_name << std::endl;
         return false;
       }
     }
@@ -134,7 +136,7 @@ class KITTIData {
             fLables.read((char*)mat_field, mat_byte_size);
             fLables.close(); 
         } else {
-          ROS_ERROR_STREAM("Cannot open label binary file " << label_bin_name);
+          std::cerr << "ERROR: Cannot open label binary file " << label_bin_name << std::endl;
           return false;
         }
         return true;

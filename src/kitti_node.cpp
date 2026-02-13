@@ -1,14 +1,15 @@
 #include <string>
 #include <iostream>
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
+#include <chrono>
 
 #include "bkioctomap.h"
 #include "markerarray_pub.h"
 #include "kitti_util.h"
 
 int main(int argc, char **argv) {
-    ros::init(argc, argv, "kitti_node");
-    ros::NodeHandle nh("~");
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("kitti_node");
 
     std::string map_topic("/occupied_cells_vis_array");
     int block_depth = 4;
@@ -43,39 +44,69 @@ int main(int argc, char **argv) {
     bool reproject = false;
     bool visualize = false;
 
-    nh.param<int>("block_depth", block_depth, block_depth);
-    nh.param<double>("sf2", sf2, sf2);
-    nh.param<double>("ell", ell, ell);
-    nh.param<float>("prior", prior, prior);
-    nh.param<float>("var_thresh", var_thresh, var_thresh);
-    nh.param<double>("free_thresh", free_thresh, free_thresh);
-    nh.param<double>("occupied_thresh", occupied_thresh, occupied_thresh);
-    nh.param<double>("resolution", resolution, resolution);
-    nh.param<int>("num_class", num_class, num_class);
-    nh.param<double>("free_resolution", free_resolution, free_resolution);
-    nh.param<double>("ds_resolution", ds_resolution, ds_resolution);
-    nh.param<int>("scan_num", scan_num, scan_num);
-    nh.param<double>("max_range", max_range, max_range);
+    // Declare parameters
+    node->declare_parameter<int>("block_depth", block_depth);
+    node->declare_parameter<double>("sf2", sf2);
+    node->declare_parameter<double>("ell", ell);
+    node->declare_parameter<float>("prior", prior);
+    node->declare_parameter<float>("var_thresh", var_thresh);
+    node->declare_parameter<double>("free_thresh", free_thresh);
+    node->declare_parameter<double>("occupied_thresh", occupied_thresh);
+    node->declare_parameter<double>("resolution", resolution);
+    node->declare_parameter<int>("num_class", num_class);
+    node->declare_parameter<double>("free_resolution", free_resolution);
+    node->declare_parameter<double>("ds_resolution", ds_resolution);
+    node->declare_parameter<int>("scan_num", scan_num);
+    node->declare_parameter<double>("max_range", max_range);
+    node->declare_parameter<std::string>("dir", dir);
+    node->declare_parameter<std::string>("left_img_prefix", left_img_prefix);
+    node->declare_parameter<std::string>("depth_img_prefix", depth_img_prefix);
+    node->declare_parameter<std::string>("label_bin_prefix", label_bin_prefix);
+    node->declare_parameter<std::string>("camera_pose_file", camera_pose_file);
+    node->declare_parameter<std::string>("evaluation_list_file", evaluation_list_file);
+    node->declare_parameter<std::string>("reproj_img_prefix", reproj_img_prefix);
+    node->declare_parameter<int>("image_width", image_width);
+    node->declare_parameter<int>("image_height", image_height);
+    node->declare_parameter<float>("focal_x", focal_x);
+    node->declare_parameter<float>("focal_y", focal_y);
+    node->declare_parameter<float>("center_x", center_x);
+    node->declare_parameter<float>("center_y", center_y);
+    node->declare_parameter<float>("depth_scaling", depth_scaling);
+    node->declare_parameter<bool>("reproject", reproject);
+    node->declare_parameter<bool>("visualize", visualize);
 
-    // KITTI
-    nh.param<std::string>("dir", dir, dir);
-    nh.param<std::string>("left_img_prefix", left_img_prefix, left_img_prefix);
-    nh.param<std::string>("depth_img_prefix", depth_img_prefix, depth_img_prefix);
-    nh.param<std::string>("label_bin_prefix", label_bin_prefix, label_bin_prefix);
-    nh.param<std::string>("camera_pose_file", camera_pose_file, camera_pose_file);
-    nh.param<std::string>("evaluation_list_file", evaluation_list_file, evaluation_list_file);
-    nh.param<std::string>("reproj_img_prefix", reproj_img_prefix, reproj_img_prefix);
-    nh.param<int>("image_width", image_width, image_width);
-    nh.param<int>("image_height", image_height, image_height);
-    nh.param<float>("focal_x", focal_x, focal_x);
-    nh.param<float>("focal_y", focal_y, focal_y);
-    nh.param<float>("center_x", center_x, center_x);
-    nh.param<float>("center_y", center_y, center_y);
-    nh.param<float>("depth_scaling", depth_scaling, depth_scaling);
-    nh.param<bool>("reproject", reproject, reproject);
-    nh.param<bool>("visualize", visualize, visualize);
+    // Get parameters
+    node->get_parameter<int>("block_depth", block_depth);
+    node->get_parameter<double>("sf2", sf2);
+    node->get_parameter<double>("ell", ell);
+    node->get_parameter<float>("prior", prior);
+    node->get_parameter<float>("var_thresh", var_thresh);
+    node->get_parameter<double>("free_thresh", free_thresh);
+    node->get_parameter<double>("occupied_thresh", occupied_thresh);
+    node->get_parameter<double>("resolution", resolution);
+    node->get_parameter<int>("num_class", num_class);
+    node->get_parameter<double>("free_resolution", free_resolution);
+    node->get_parameter<double>("ds_resolution", ds_resolution);
+    node->get_parameter<int>("scan_num", scan_num);
+    node->get_parameter<double>("max_range", max_range);
+    node->get_parameter<std::string>("dir", dir);
+    node->get_parameter<std::string>("left_img_prefix", left_img_prefix);
+    node->get_parameter<std::string>("depth_img_prefix", depth_img_prefix);
+    node->get_parameter<std::string>("label_bin_prefix", label_bin_prefix);
+    node->get_parameter<std::string>("camera_pose_file", camera_pose_file);
+    node->get_parameter<std::string>("evaluation_list_file", evaluation_list_file);
+    node->get_parameter<std::string>("reproj_img_prefix", reproj_img_prefix);
+    node->get_parameter<int>("image_width", image_width);
+    node->get_parameter<int>("image_height", image_height);
+    node->get_parameter<float>("focal_x", focal_x);
+    node->get_parameter<float>("focal_y", focal_y);
+    node->get_parameter<float>("center_x", center_x);
+    node->get_parameter<float>("center_y", center_y);
+    node->get_parameter<float>("depth_scaling", depth_scaling);
+    node->get_parameter<bool>("reproject", reproject);
+    node->get_parameter<bool>("visualize", visualize);
 
-    ROS_INFO_STREAM("Parameters:" << std::endl <<
+    RCLCPP_INFO_STREAM(node->get_logger(), "Parameters:" << std::endl <<
       "block_depth: " << block_depth << std::endl <<
       "sf2: " << sf2 << std::endl <<
       "ell: " << ell << std::endl <<
@@ -124,8 +155,8 @@ int main(int argc, char **argv) {
 
     ///////// Build Map /////////////////////
     semantic_bki::SemanticBKIOctoMap map(resolution, block_depth, num_class, sf2, ell, prior, var_thresh, free_thresh, occupied_thresh);
-    semantic_bki::MarkerArrayPub m_pub(nh, map_topic, 0.1f);
-    ros::Time start = ros::Time::now();
+    semantic_bki::MarkerArrayPub m_pub(node, map_topic, 0.1f);
+    auto start = node->now();
     for (int scan_id = 0; scan_id <= scan_num; ++scan_id) {
       semantic_bki::PCLPointCloud cloud;
       semantic_bki::point3f origin;
@@ -141,7 +172,7 @@ int main(int argc, char **argv) {
       kitti_data.process_depth_img(scan_id, depth_img, cloud, origin, reproject);
       
       map.insert_pointcloud(cloud, origin, resolution, free_resolution, max_range);
-      ROS_INFO_STREAM("Scan " << scan_id << " done");
+      RCLCPP_INFO_STREAM(node->get_logger(), "Scan " << scan_id << " done");
      
       if (reproject)
         kitti_data.reproject_imgs(scan_id, map); 
@@ -157,9 +188,11 @@ int main(int argc, char **argv) {
         m_pub.publish();
       }
     }
-    ros::Time end = ros::Time::now();
-    ROS_INFO_STREAM("Mapping finished in " << (end - start).toSec() << "s");
+    auto end = node->now();
+    rclcpp::Duration elapsed = end - start;
+    RCLCPP_INFO_STREAM(node->get_logger(), "Mapping finished in " << elapsed.seconds() << "s");
         
-    ros::spin();
+    rclcpp::spin(node);
+    rclcpp::shutdown();
     return 0;
 }
