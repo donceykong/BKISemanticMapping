@@ -110,17 +110,20 @@ def launch_setup(context):
     )
     
     # MCD node (scan processing) - now with OSM prior support
+    # color_mode, osm_decay_meters, osm_file, osm_origin_* come from dataset config (mcd.yaml) by default
     mcd_params = [
         {'dir': data_dir_path},
         {'calibration_file': calib_file_path},
-        {'color_mode': color_mode},  # Visualization color mode
-        {'osm_file': osm_file},  # OSM file path for voxel priors
-        {'osm_origin_lat': float(osm_origin_lat)},  # OSM origin latitude
-        {'osm_origin_lon': float(osm_origin_lon)},  # OSM origin longitude
-        {'osm_decay_meters': float(osm_decay_meters)},  # OSM prior decay distance
         method_config_path,
         data_config_path
     ]
+    # Allow launch args to override OSM settings when explicitly provided (e.g. osm_file:=other.osm)
+    if osm_file or osm_origin_lat != '0.0' or osm_origin_lon != '0.0':
+        mcd_params.append({
+            'osm_file': osm_file,
+            'osm_origin_lat': float(osm_origin_lat),
+            'osm_origin_lon': float(osm_origin_lon),
+        })
     
     mcd_node = Node(
         package='semantic_bki',

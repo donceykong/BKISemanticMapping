@@ -24,5 +24,14 @@
     query: true
     visualize: true
 
+    # Visualization: show OSM priors colored (blend of building/road/grassland/tree). Use semantic for class colors.
+    color_mode: osm_blend
+    # OSM prior decay: distance (m) over which prior drops from 1 to 0 away from OSM geometry
+    osm_decay_meters: 2.0
+    # OSM file for voxel priors (path relative to data dir, or absolute). Must match osm_visualizer if using both.
+    osm_file: kth.osm
+    osm_origin_lat: 59.348268650
+    osm_origin_lon: 18.073204280
+
     # Color configuration
     colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
