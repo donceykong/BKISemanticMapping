@@ -3,11 +3,14 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <set>
 #include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#include <cstdint>
+#include <cstdio>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -235,6 +238,21 @@ class MCDData {
       if (map_) map_->set_osm_decay_meters(decay_m);
     }
 
+    /// Return true if both the lidar bin and label file exist for the given scan file number.
+    bool scan_and_label_exist(const std::string& input_data_dir, const std::string& input_label_dir, int scan_file_num) {
+      char scan_id_c[256];
+      std::snprintf(scan_id_c, sizeof(scan_id_c), "%010d", scan_file_num);
+      std::string scan_name = input_data_dir + "/" + std::string(scan_id_c) + ".bin";
+      std::string label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
+      FILE* fp = std::fopen(scan_name.c_str(), "rb");
+      if (!fp) return false;
+      std::fclose(fp);
+      FILE* fp_label = std::fopen(label_name.c_str(), "rb");
+      if (!fp_label) return false;
+      std::fclose(fp_label);
+      return true;
+    }
+
     bool process_scans(std::string input_data_dir, std::string input_label_dir, int scan_num, int skip_frames, bool query, bool visualize) {
       if (!map_) {
         RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: process_scans: map_ is null!");
@@ -249,26 +267,37 @@ class MCDData {
         return false;
       }
       
+      // Build list of pose indices where both lidar bin and label file exist (matching file names)
+      std::vector<int> valid_pose_indices;
+      valid_pose_indices.reserve(lidar_poses_.size());
+      for (int pose_idx = 0; pose_idx < static_cast<int>(lidar_poses_.size()); ++pose_idx) {
+        int scan_file_num = scan_indices_[pose_idx];
+        if (scan_and_label_exist(input_data_dir, input_label_dir, scan_file_num))
+          valid_pose_indices.push_back(pose_idx);
+      }
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Found " << valid_pose_indices.size() << " scans with both lidar and label files (out of " << lidar_poses_.size() << " poses). Applying scan_num=" << scan_num << ", skip_frames=" << skip_frames);
+      
+      // Apply scan_num and skip_frames to the valid set: take every (skip_frames+1)-th valid scan, up to scan_num
+      int valid_count = 0;
+      std::vector<int> indices_to_process;
+      for (size_t i = 0; i < valid_pose_indices.size(); ++i) {
+        if (skip_frames > 0 && valid_count % (skip_frames + 1) != 0) {
+          valid_count++;
+          continue;
+        }
+        if (static_cast<int>(indices_to_process.size()) >= scan_num)
+          break;
+        indices_to_process.push_back(valid_pose_indices[i]);
+        valid_count++;
+      }
+      
       semantic_bki::point3f origin;
-      
-      // Only process scans that have corresponding poses
-      int num_scans_to_process = std::min(scan_num, (int)lidar_poses_.size());
-      
-      // Skip frames logic: if skip_frames=2, process frames 0, 3, 6, 9, etc. (skip 2, process 1)
-      int processed_count = 0;
       int insertion_count = 0;
       
-      for (int pose_idx = 0; pose_idx < num_scans_to_process; ++pose_idx) {
-        // Skip frames based on skip_frames parameter
-        if (skip_frames > 0 && processed_count % (skip_frames + 1) != 0) {
-          processed_count++;
-          continue;  // Skip this frame
-        }
-        processed_count++;
-        // Get the actual scan file number from CSV
+      for (size_t list_idx = 0; list_idx < indices_to_process.size(); ++list_idx) {
+        int pose_idx = indices_to_process[list_idx];
         int scan_file_num = scan_indices_[pose_idx];
         
-        // Use 10-digit format for MCD file naming (e.g., 0000000011.bin)
         char scan_id_c[256];
         sprintf(scan_id_c, "%010d", scan_file_num);
         std::string scan_name = input_data_dir + "/" + std::string(scan_id_c) + ".bin";
@@ -320,9 +349,9 @@ class MCDData {
         
         tf_broadcaster_.sendTransform(t);
         
-        // Debug: Print transform info for first few scans
-        if (pose_idx < 3) {
-          RCLCPP_INFO_STREAM(node_->get_logger(), "Scan " << pose_idx << " Transform info:");
+        // Debug: Print transform info for first few processed scans
+        if (list_idx < 3) {
+          RCLCPP_INFO_STREAM(node_->get_logger(), "Scan " << list_idx << " (pose_idx " << pose_idx << ") Transform info:");
           RCLCPP_INFO_STREAM(node_->get_logger(), "  Body-to-world translation from CSV: [" << transform(0,3) << ", " << transform(1,3) << ", " << transform(2,3) << "]");
           RCLCPP_INFO_STREAM(node_->get_logger(), "  Lidar-to-map translation: [" << lidar_to_map(0,3) << ", " << lidar_to_map(1,3) << ", " << lidar_to_map(2,3) << "]");
           RCLCPP_INFO_STREAM(node_->get_logger(), "  TF translation (from lidar_to_map): [" << translation(0) << ", " << translation(1) << ", " << translation(2) << "]");
@@ -340,7 +369,7 @@ class MCDData {
         cloud_msg.header.stamp = node_->now();
         pointcloud_pub_->publish(cloud_msg);
         
-        if (pose_idx == 0) {
+        if (insertion_count == 0) {
           RCLCPP_INFO_STREAM(node_->get_logger(), "Published PointCloud2 with " << cloud->points.size() << " points in frame 'lidar'");
         }
         
@@ -716,7 +745,14 @@ class MCDData {
       std::fseek(fp, 0L, SEEK_END);
       size_t sz = std::ftell(fp);
       std::rewind(fp);
-      int n_hits = sz / (sizeof(float) * 4);
+      int n_hits = static_cast<int>(sz / (sizeof(float) * 4));
+
+      // Get label file size (expected: n_hits * sizeof(uint32_t) per label)
+      std::fseek(fp_label, 0L, SEEK_END);
+      long label_file_sz = std::ftell(fp_label);
+      std::rewind(fp_label);
+      int num_labels_in_file = static_cast<int>(label_file_sz / sizeof(uint32_t));
+      RCLCPP_INFO_STREAM(node_->get_logger(), "\n\n\n\n     Scan: " << fn << " \n\nlabel file: " << fn_label << " number of labels: " << num_labels_in_file << "\n\n\n\n");
 
       // Preallocate point cloud for better performance (avoids reallocation)
       pcl::PointCloud<pcl::PointXYZL>::Ptr pc(new pcl::PointCloud<pcl::PointXYZL>);
@@ -731,8 +767,9 @@ class MCDData {
       pc->height = 1;
       pc->is_dense = false;
 
-      // Read data in a tighter loop
+      // Read data in a tighter loop; collect unique class IDs for logging
       int points_read = 0;
+      std::set<int> unique_labels;
       for (int i = 0; i < n_hits; i++) {
         pcl::PointXYZL point;
         float intensity;
@@ -747,13 +784,39 @@ class MCDData {
         // Read label (uint32)
         if (fread(&label, sizeof(uint32_t), 1, fp_label) != 1) break;
 
-        point.label = (int)label;
+        point.label = static_cast<int>(label);
+        unique_labels.insert(point.label);
         pc->points.push_back(point);
         points_read++;
       }
       
       std::fclose(fp);
       std::fclose(fp_label);
+      
+      // // Print list of unique class IDs in this label file (should match Python inspect_label_file.py)
+      // std::ostringstream oss;
+      // oss << "Unique classes in label file (" << fn_label << "): ";
+      // for (auto it = unique_labels.begin(); it != unique_labels.end(); ++it) {
+      //   if (it != unique_labels.begin()) oss << ", ";
+      //   oss << *it;
+      // }
+      // RCLCPP_INFO_STREAM(node_->get_logger(), oss.str());
+      // // Sanity: first few label values (compare with Python inspect_label_file.py)
+      // if (points_read >= 5) {
+      //   std::ostringstream dbg;
+      //   dbg << "First 5 label values (uint32): " << pc->points[0].label << ", " << pc->points[1].label << ", " << pc->points[2].label << ", " << pc->points[3].label << ", " << pc->points[4].label;
+      //   RCLCPP_INFO_STREAM(node_->get_logger(), dbg.str());
+      // }
+      
+      // // RED error if label count does not match point count
+      // if (points_read != n_hits || num_labels_in_file != n_hits) {
+      //   RCLCPP_ERROR_STREAM(node_->get_logger(),
+      //     "ERROR: Label count does not match point count! scan=" << fn
+      //     << " label_file=" << fn_label
+      //     << " points_in_scan=" << n_hits
+      //     << " labels_in_file=" << num_labels_in_file
+      //     << " points_read=" << points_read);
+      // }
       
       return pc;
     }
