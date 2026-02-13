@@ -103,11 +103,9 @@ def launch_setup(context):
     mcd_params = [
         {'dir': data_dir_path},
         {'calibration_file': calib_file_path},  # Pass as string parameter, not a parameter file
-        {'color_mode': color_mode},  # Visualization color mode
         {'osm_file': osm_file},  # OSM file path
         {'osm_origin_lat': float(osm_origin_lat)},  # OSM origin latitude
         {'osm_origin_lon': float(osm_origin_lon)},  # OSM origin longitude
-        {'osm_decay_meters': float(osm_decay_meters)},  # OSM prior decay distance
         method_config_path,
         data_config_path
     ]

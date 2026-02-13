@@ -19,6 +19,8 @@ namespace semantic_bki {
         using MatrixDKType = Eigen::Matrix<T, -1, 1>;
         using MatrixYType = Eigen::Matrix<T, -1, 1>;
 
+        /// nc = num_class: both the number of output classes and the label index range [0, nc).
+        /// Only training labels in [0, nc-1] are used; predicted semantics are in [0, nc-1]. Set nc >= max_label_id + 1.
         SemanticBKInference(int nc, T sf2, T ell) : nc(nc), sf2(sf2), ell(ell), trained(false) { }
 
         /*
