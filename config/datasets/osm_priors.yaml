@@ -1,0 +1,16 @@
+# OSM-to-Semantic-Class Mapping Configuration
+# Maps OSM geometry types to Semantic KITTI class IDs for likelihood adjustment.
+# When a voxel has an OSM prior (e.g., osm_building=0.8), the likelihood of the matching
+# semantic class(es) is increased, and other classes are decreased proportionally.
+#
+# Format: Each OSM type maps to a list of semantic class IDs (as strings, then parsed to int).
+# Example: osm_buildings: ["50"] means Semantic KITTI class 50 (building) gets boosted when osm_building prior > 0.
+
+/**:
+  ros__parameters:
+    # Semantic KITTI class IDs for each OSM type
+    osm_buildings: ["50"]        # Semantic KITTI class 50 = building
+    osm_roads: ["40"]            # Semantic KITTI class 40 = road
+    osm_grasslands: ["70", "71"]       # Semantic KITTI class 44 = parking (or grassland)
+    osm_trees: ["71"]            # Semantic KITTI class 48 = sidewalk (or tree polygon)
+    osm_tree_points: ["70", "71", "72"]  # Semantic KITTI classes 70=vegetation, 71=trunk, 72=terrain

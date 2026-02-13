@@ -237,6 +237,15 @@ class MCDData {
     void set_osm_decay_meters(float decay_m) {
       if (map_) map_->set_osm_decay_meters(decay_m);
     }
+    void set_osm_decay_exponent(float exponent) {
+      if (map_) map_->set_osm_decay_exponent(exponent);
+    }
+    void set_osm_class_mapping(const std::vector<int>& osm_building_classes,
+                                const std::vector<int>& osm_road_classes,
+                                const std::vector<int>& osm_grassland_classes,
+                                const std::vector<int>& osm_tree_classes) {
+      if (map_) map_->set_osm_class_mapping(osm_building_classes, osm_road_classes, osm_grassland_classes, osm_tree_classes);
+    }
 
     /// Return true if both the lidar bin and label file exist for the given scan file number.
     bool scan_and_label_exist(const std::string& input_data_dir, const std::string& input_label_dir, int scan_file_num) {

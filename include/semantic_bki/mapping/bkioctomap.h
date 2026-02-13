@@ -332,6 +332,19 @@ namespace semantic_bki {
         void set_osm_trees(const std::vector<Geometry2D> &trees);
         void set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points);
         void set_osm_decay_meters(float decay_m);
+        /// Set OSM decay exponent: controls decay curve shape. 1.0=linear, >1.0=steeper, <1.0=gentler.
+        void set_osm_decay_exponent(float exponent);
+        
+        /// Set OSM-to-semantic-class mapping (from osm_priors.yaml). Each OSM type maps to a list of class IDs.
+        void set_osm_class_mapping(const std::vector<int>& osm_building_classes,
+                                    const std::vector<int>& osm_road_classes,
+                                    const std::vector<int>& osm_grassland_classes,
+                                    const std::vector<int>& osm_tree_classes);
+        
+        /// Apply OSM prior adjustment to node probabilities (after update): nudge matching classes, recompute semantics.
+        /// This applies a soft adjustment to probabilities, not ybars, so it doesn't accumulate over time.
+        void apply_osm_prior_to_node(SemanticOcTreeNode& node, float osm_building, float osm_road,
+                                     float osm_grassland, float osm_tree) const;
 
     private:
         /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points).
@@ -402,6 +415,13 @@ namespace semantic_bki {
         std::vector<Geometry2D> osm_trees_;
         std::vector<std::pair<float, float>> osm_tree_points_;
         float osm_decay_meters_;
+        float osm_decay_exponent_;  // Decay curve exponent: 1.0=linear, >1.0=steeper, <1.0=gentler
+        
+        // OSM-to-semantic-class mapping: which class IDs correspond to each OSM type
+        std::vector<int> osm_building_classes_;  // e.g. [50] for Semantic KITTI building
+        std::vector<int> osm_road_classes_;      // e.g. [40] for Semantic KITTI road
+        std::vector<int> osm_grassland_classes_; // e.g. [44] for Semantic KITTI parking/grassland
+        std::vector<int> osm_tree_classes_;      // e.g. [70, 71, 72] for Semantic KITTI vegetation/trunk/terrain
     };
 
 }

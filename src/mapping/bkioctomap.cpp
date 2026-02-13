@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <pcl/filters/voxel_grid.h>
 
 #include "bkioctomap.h"
@@ -26,7 +27,7 @@ namespace semantic_bki {
                                         1.0f, // prior
                                         1.0f, // var_thresh
                                         0.3f, // free_thresh
-                                        0.7f // occupied_thresh
+                                        0.99f // occupied_thresh
                                     ) { }
 
     SemanticBKIOctoMap::SemanticBKIOctoMap(float resolution,
@@ -40,7 +41,9 @@ namespace semantic_bki {
                         float occupied_thresh)
             : resolution(resolution), block_depth(block_depth),
               block_size((float) pow(2, block_depth - 1) * resolution),
-              osm_decay_meters_(2.0f) {
+              osm_decay_meters_(2.0f),
+              osm_decay_exponent_(1.0f),  // Linear decay by default
+              osm_building_classes_(), osm_road_classes_(), osm_grassland_classes_(), osm_tree_classes_() {
         Block::resolution = resolution;
         Block::size = this->block_size;
         Block::key_loc_map = init_key_loc_map(resolution, block_depth);
@@ -203,14 +206,23 @@ namespace semantic_bki {
             int j = 0;
             for (auto leaf_it = block->begin_leaf(); leaf_it != block->end_leaf(); ++leaf_it, ++j) {
                 SemanticOcTreeNode &node = leaf_it.get_node();
-
-                // Only need to update if kernel density total kernel density est > 0
-                node.update(ybars[j]);
                 point3f loc = block->get_loc(leaf_it);
-                node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
-                node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
-                node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
-                node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
+
+                // Update node with ybars first (normal accumulation)
+                node.update(ybars[j]);
+                
+                // Compute and store OSM priors
+                float osm_building = compute_osm_building_prior(loc.x(), loc.y());
+                float osm_road = compute_osm_road_prior(loc.x(), loc.y());
+                float osm_grassland = compute_osm_grassland_prior(loc.x(), loc.y());
+                float osm_tree = compute_osm_tree_prior(loc.x(), loc.y());
+                node.set_osm_building(osm_building);
+                node.set_osm_road(osm_road);
+                node.set_osm_grassland(osm_grassland);
+                node.set_osm_tree(osm_tree);
+                
+                // Apply OSM prior adjustment to probabilities (nudges semantics without accumulating)
+                apply_osm_prior_to_node(node, osm_building, osm_road, osm_grassland, osm_tree);
             }
 
         }
@@ -250,6 +262,131 @@ namespace semantic_bki {
         osm_decay_meters_ = decay_m;
     }
 
+    void SemanticBKIOctoMap::set_osm_decay_exponent(float exponent) {
+        osm_decay_exponent_ = exponent;
+    }
+
+    void SemanticBKIOctoMap::set_osm_class_mapping(const std::vector<int>& osm_building_classes,
+                                                    const std::vector<int>& osm_road_classes,
+                                                    const std::vector<int>& osm_grassland_classes,
+                                                    const std::vector<int>& osm_tree_classes) {
+        osm_building_classes_ = osm_building_classes;
+        osm_road_classes_ = osm_road_classes;
+        osm_grassland_classes_ = osm_grassland_classes;
+        osm_tree_classes_ = osm_tree_classes;
+    }
+
+    void SemanticBKIOctoMap::apply_osm_prior_to_node(SemanticOcTreeNode& node, float osm_building, float osm_road,
+                                                      float osm_grassland, float osm_tree) const {
+        // Get current probabilities from the node (after update has been called)
+        std::vector<float> probs(SemanticOcTreeNode::num_class);
+        node.get_probs(probs);
+        
+        // Collect all classes that should be nudged (based on OSM priors)
+        std::vector<float> class_prior(probs.size(), 0.f);
+        
+        if (osm_building > 0.f && !osm_building_classes_.empty()) {
+            for (int cls : osm_building_classes_) {
+                if (cls >= 0 && cls < static_cast<int>(probs.size())) {
+                    if (osm_building > class_prior[cls]) {
+                        class_prior[cls] = osm_building;
+                    }
+                }
+            }
+        }
+        if (osm_road > 0.f && !osm_road_classes_.empty()) {
+            for (int cls : osm_road_classes_) {
+                if (cls >= 0 && cls < static_cast<int>(probs.size())) {
+                    if (osm_road > class_prior[cls]) {
+                        class_prior[cls] = osm_road;
+                    }
+                }
+            }
+        }
+        if (osm_grassland > 0.f && !osm_grassland_classes_.empty()) {
+            for (int cls : osm_grassland_classes_) {
+                if (cls >= 0 && cls < static_cast<int>(probs.size())) {
+                    if (osm_grassland > class_prior[cls]) {
+                        class_prior[cls] = osm_grassland;
+                    }
+                }
+            }
+        }
+        if (osm_tree > 0.f && !osm_tree_classes_.empty()) {
+            for (int cls : osm_tree_classes_) {
+                if (cls >= 0 && cls < static_cast<int>(probs.size())) {
+                    if (osm_tree > class_prior[cls]) {
+                        class_prior[cls] = osm_tree;
+                    }
+                }
+            }
+        }
+        
+        // Get original winning class before any adjustment
+        int original_semantics = node.semantics;
+        
+        // Check if any prior exceeds threshold
+        const float osm_prior_strength = 0.00000008f;  // 1% boost per 1.0 prior - very conservative
+        const float osm_prior_threshold = 0.0f;   // Only apply adjustment when prior >= 0.3
+        
+        // Check if we should apply adjustment (at least one prior exceeds threshold)
+        bool should_adjust = false;
+        for (size_t i = 0; i < probs.size(); ++i) {
+            if (class_prior[i] >= osm_prior_threshold) {
+                should_adjust = true;
+                break;
+            }
+        }
+        
+        if (!should_adjust) {
+            return;  // Priors too weak, skip adjustment
+        }
+        
+        // Apply soft multiplicative adjustment to probabilities (not ybars)
+        // This nudges the probabilities without accumulating over time
+        std::vector<float> adjusted_probs = probs;
+        for (size_t i = 0; i < adjusted_probs.size(); ++i) {
+            if (class_prior[i] >= osm_prior_threshold) {
+                // Boost matching classes: prob *= (1 + prior * strength)
+                float boost_factor = 1.f + class_prior[i] * osm_prior_strength;
+                adjusted_probs[i] *= boost_factor;
+            }
+        }
+        
+        // Normalize adjusted probabilities to sum to 1.0
+        float prob_sum = 0.f;
+        for (float p : adjusted_probs) {
+            prob_sum += p;
+        }
+        if (prob_sum > 0.f) {
+            for (size_t i = 0; i < adjusted_probs.size(); ++i) {
+                adjusted_probs[i] /= prob_sum;
+            }
+        }
+        
+        // Check if adjustment changed the winning class
+        int new_semantics = std::distance(adjusted_probs.begin(), 
+                                          std::max_element(adjusted_probs.begin(), adjusted_probs.end()));
+        
+        // // Only apply adjustment if it doesn't change the semantics (nudge, don't override)
+        // if (new_semantics != original_semantics) {
+        //     return;  // Adjustment would override semantics, skip it
+        // }
+        
+        // Apply the adjustment (it's safe - won't change semantics)
+        float ms_sum = 0.f;
+        for (float m : node.ms) {
+            ms_sum += m;
+        }
+        
+        if (ms_sum > 0.f) {
+            for (size_t i = 0; i < node.ms.size(); ++i) {
+                node.ms[i] = adjusted_probs[i] * ms_sum;
+            }
+            // Semantics remains unchanged (already verified above)
+        }
+    }
+
     float SemanticBKIOctoMap::compute_osm_building_prior(float x, float y) const {
         if (osm_buildings_.empty()) return 0.f;
         float min_positive_d = std::numeric_limits<float>::max();
@@ -258,7 +395,7 @@ namespace semantic_bki {
             if (signed_d <= 0.f) return 1.f;  // inside a building
             if (signed_d < min_positive_d) min_positive_d = signed_d;
         }
-        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_, osm_decay_exponent_);
     }
 
     float SemanticBKIOctoMap::compute_osm_road_prior(float x, float y) const {
@@ -268,7 +405,7 @@ namespace semantic_bki {
             float d = distance_to_polyline(x, y, road);
             if (d < min_d) min_d = d;
         }
-        return osm_prior_from_distance(min_d, osm_decay_meters_);
+        return osm_prior_from_distance(min_d, osm_decay_meters_, osm_decay_exponent_);
     }
 
     float SemanticBKIOctoMap::compute_osm_grassland_prior(float x, float y) const {
@@ -279,7 +416,7 @@ namespace semantic_bki {
             if (signed_d <= 0.f) return 1.f;  // inside grassland
             if (signed_d < min_positive_d) min_positive_d = signed_d;
         }
-        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_, osm_decay_exponent_);
     }
 
     float SemanticBKIOctoMap::compute_osm_tree_prior(float x, float y) const {
@@ -296,14 +433,14 @@ namespace semantic_bki {
                 if (signed_d < min_positive_d) min_positive_d = signed_d;
             }
             if (max_prior < 1.f) {
-                float poly_prior = osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+                float poly_prior = osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_, osm_decay_exponent_);
                 if (poly_prior > max_prior) max_prior = poly_prior;
             }
         }
         // Check tree points (single trees)
         if (!osm_tree_points_.empty()) {
             float d = distance_to_points(x, y, osm_tree_points_);
-            float point_prior = osm_prior_from_distance(d, osm_decay_meters_);
+            float point_prior = osm_prior_from_distance(d, osm_decay_meters_, osm_decay_exponent_);
             if (point_prior > max_prior) max_prior = point_prior;
         }
         return max_prior;
@@ -426,14 +563,23 @@ namespace semantic_bki {
                 int j = 0;
                 for (auto leaf_it = block->begin_leaf(); leaf_it != block->end_leaf(); ++leaf_it, ++j) {
                     SemanticOcTreeNode &node = leaf_it.get_node();
-                    // Only need to update if kernel density total kernel density est > 0
-                    //if (kbar[j] > 0.0)
-                    node.update(ybars[j]);
                     point3f loc = block->get_loc(leaf_it);
-                    node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
-                    node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
-                    node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
-                    node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
+                    
+                    // Update node with ybars first (normal accumulation)
+                    node.update(ybars[j]);
+                    
+                    // Compute and store OSM priors
+                    float osm_building = compute_osm_building_prior(loc.x(), loc.y());
+                    float osm_road = compute_osm_road_prior(loc.x(), loc.y());
+                    float osm_grassland = compute_osm_grassland_prior(loc.x(), loc.y());
+                    float osm_tree = compute_osm_tree_prior(loc.x(), loc.y());
+                    node.set_osm_building(osm_building);
+                    node.set_osm_road(osm_road);
+                    node.set_osm_grassland(osm_grassland);
+                    node.set_osm_tree(osm_tree);
+                    
+                    // Apply OSM prior adjustment to probabilities (nudges semantics without accumulating)
+                    apply_osm_prior_to_node(node, osm_building, osm_road, osm_grassland, osm_tree);
                 }
             }
         }

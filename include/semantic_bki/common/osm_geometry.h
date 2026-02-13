@@ -96,11 +96,34 @@ namespace semantic_bki {
         return std::max(0.f, 1.f - signed_d / decay_m);
     }
 
+    /// OSM prior value with configurable decay exponent: inside -> 1.0, outside -> decay by distance.
+    /// signed_d: result of distance_to_polygon_boundary (negative inside, positive outside).
+    /// decay_m: distance in meters over which prior drops from 1 to 0.
+    /// exponent: decay curve shape. 1.0=linear, >1.0=steeper (e.g., 2.0=quadratic), <1.0=gentler (e.g., 0.5=sqrt).
+    inline float osm_prior_from_signed_distance(float signed_d, float decay_m, float exponent) {
+        if (decay_m <= 0.f) return signed_d <= 0.f ? 1.f : 0.f;
+        if (signed_d <= 0.f) return 1.f;
+        float normalized_dist = signed_d / decay_m;
+        if (normalized_dist >= 1.f) return 0.f;
+        return std::max(0.f, 1.f - std::pow(normalized_dist, exponent));
+    }
+
     /// OSM prior value for polylines/points: decay by distance (always positive distance).
     /// d: distance to nearest polyline segment or point.
     /// decay_m: distance in meters over which prior drops from 1 to 0.
     inline float osm_prior_from_distance(float d, float decay_m) {
         if (decay_m <= 0.f) return 0.f;
         return std::max(0.f, 1.f - d / decay_m);
+    }
+
+    /// OSM prior value for polylines/points with configurable decay exponent.
+    /// d: distance to nearest polyline segment or point.
+    /// decay_m: distance in meters over which prior drops from 1 to 0.
+    /// exponent: decay curve shape. 1.0=linear, >1.0=steeper (e.g., 2.0=quadratic), <1.0=gentler (e.g., 0.5=sqrt).
+    inline float osm_prior_from_distance(float d, float decay_m, float exponent) {
+        if (decay_m <= 0.f) return 0.f;
+        float normalized_dist = d / decay_m;
+        if (normalized_dist >= 1.f) return 0.f;
+        return std::max(0.f, 1.f - std::pow(normalized_dist, exponent));
     }
 }

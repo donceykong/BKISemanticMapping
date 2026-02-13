@@ -84,6 +84,7 @@ int main(int argc, char **argv) {
     node->declare_parameter<double>("osm_origin_lat", 0.0);
     node->declare_parameter<double>("osm_origin_lon", 0.0);
     node->declare_parameter<double>("osm_decay_meters", 2.0);
+    node->declare_parameter<double>("osm_decay_exponent", 1.0);  // 1.0=linear, >1.0=steeper, <1.0=gentler
 
     // Get parameters
     node->get_parameter<std::string>("map_topic", map_topic);
@@ -123,11 +124,12 @@ int main(int argc, char **argv) {
     node->get_parameter<std::string>("color_mode", color_mode_str);
 
     std::string osm_file;
-    double osm_origin_lat, osm_origin_lon, osm_decay_meters;
+    double osm_origin_lat, osm_origin_lon, osm_decay_meters, osm_decay_exponent;
     node->get_parameter<std::string>("osm_file", osm_file);
     node->get_parameter<double>("osm_origin_lat", osm_origin_lat);
     node->get_parameter<double>("osm_origin_lon", osm_origin_lon);
     node->get_parameter<double>("osm_decay_meters", osm_decay_meters);
+    node->get_parameter<double>("osm_decay_exponent", osm_decay_exponent);
     
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: All parameters retrieved. dir=" << dir << ", lidar_pose_file=" << lidar_pose_file << ", calibration_file=" << calibration_file << ", color_mode=" << color_mode_str);
 
@@ -245,6 +247,63 @@ int main(int argc, char **argv) {
     }
 
     mcd_data.set_osm_decay_meters(static_cast<float>(osm_decay_meters));
+    mcd_data.set_osm_decay_exponent(static_cast<float>(osm_decay_exponent));
+
+    // Load OSM-to-semantic-class mapping from osm_priors.yaml
+    std::string pkg_path = ament_index_cpp::get_package_share_directory("semantic_bki");
+    std::string osm_priors_file = pkg_path + "/config/datasets/osm_priors.yaml";
+    try {
+      YAML::Node osm_priors_node = YAML::LoadFile(osm_priors_file);
+      if (osm_priors_node["/**"] && osm_priors_node["/**"]["ros__parameters"]) {
+        auto params = osm_priors_node["/**"]["ros__parameters"];
+        
+        std::vector<int> osm_building_classes, osm_road_classes, osm_grassland_classes, osm_tree_classes;
+        
+        // Parse osm_buildings: ["50"] -> [50]
+        if (params["osm_buildings"] && params["osm_buildings"].IsSequence()) {
+          for (const auto& cls : params["osm_buildings"]) {
+            osm_building_classes.push_back(cls.as<int>());
+          }
+        }
+        
+        // Parse osm_roads: ["40"] -> [40]
+        if (params["osm_roads"] && params["osm_roads"].IsSequence()) {
+          for (const auto& cls : params["osm_roads"]) {
+            osm_road_classes.push_back(cls.as<int>());
+          }
+        }
+        
+        // Parse osm_grasslands: ["44"] -> [44]
+        if (params["osm_grasslands"] && params["osm_grasslands"].IsSequence()) {
+          for (const auto& cls : params["osm_grasslands"]) {
+            osm_grassland_classes.push_back(cls.as<int>());
+          }
+        }
+        
+        // Parse osm_trees: ["48"] -> [48] and osm_tree_points: ["70", "71", "72"] -> [70, 71, 72]
+        if (params["osm_trees"] && params["osm_trees"].IsSequence()) {
+          for (const auto& cls : params["osm_trees"]) {
+            osm_tree_classes.push_back(cls.as<int>());
+          }
+        }
+        if (params["osm_tree_points"] && params["osm_tree_points"].IsSequence()) {
+          for (const auto& cls : params["osm_tree_points"]) {
+            osm_tree_classes.push_back(cls.as<int>());
+          }
+        }
+        
+        // Set the mapping in the map
+        mcd_data.set_osm_class_mapping(osm_building_classes, osm_road_classes, osm_grassland_classes, osm_tree_classes);
+        
+        RCLCPP_INFO_STREAM(node->get_logger(), "Loaded OSM-to-class mapping from " << osm_priors_file
+          << ": buildings=" << osm_building_classes.size() << " classes, roads=" << osm_road_classes.size()
+          << " classes, grasslands=" << osm_grassland_classes.size() << " classes, trees=" << osm_tree_classes.size() << " classes");
+      }
+    } catch (const YAML::Exception& e) {
+      RCLCPP_WARN_STREAM(node->get_logger(), "Failed to load OSM priors config from " << osm_priors_file << ": " << e.what() << ". OSM prior likelihood adjustments will be disabled.");
+    } catch (const std::exception& e) {
+      RCLCPP_WARN_STREAM(node->get_logger(), "Error loading OSM priors config: " << e.what() << ". OSM prior likelihood adjustments will be disabled.");
+    }
 
     // Optional: load OSM geometries for voxel priors (same frame as map)
     if (!osm_file.empty()) {
