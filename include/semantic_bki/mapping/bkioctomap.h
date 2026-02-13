@@ -7,6 +7,7 @@
 #include "rtree.h"
 #include "bkiblock.h"
 #include "bkioctree_node.h"
+#include "osm_geometry.h"
 
 namespace semantic_bki {
 
@@ -324,6 +325,21 @@ namespace semantic_bki {
 
         inline float get_block_size() const { return block_size; }
 
+        /// OSM semantics: set 2D geometries (same frame as map) and decay distance for prior dropoff.
+        void set_osm_buildings(const std::vector<Geometry2D> &buildings);
+        void set_osm_roads(const std::vector<Geometry2D> &roads);
+        void set_osm_grasslands(const std::vector<Geometry2D> &grasslands);
+        void set_osm_trees(const std::vector<Geometry2D> &trees);
+        void set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points);
+        void set_osm_decay_meters(float decay_m);
+
+    private:
+        /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points).
+        float compute_osm_building_prior(float x, float y) const;
+        float compute_osm_road_prior(float x, float y) const;
+        float compute_osm_grassland_prior(float x, float y) const;
+        float compute_osm_tree_prior(float x, float y) const;
+
     private:
         /// @return true if point is inside a bounding box given min and max limits.
         inline bool gp_point_in_bbox(const GPPointType &p, const point3f &lim_min, const point3f &lim_max) const {
@@ -380,6 +396,12 @@ namespace semantic_bki {
         unsigned short block_depth;
         std::unordered_map<BlockHashKey, Block *> block_arr;
         MyRTree rtree;
+        std::vector<Geometry2D> osm_buildings_;
+        std::vector<Geometry2D> osm_roads_;
+        std::vector<Geometry2D> osm_grasslands_;
+        std::vector<Geometry2D> osm_trees_;
+        std::vector<std::pair<float, float>> osm_tree_points_;
+        float osm_decay_meters_;
     };
 
 }

@@ -26,6 +26,7 @@
 
 #include "bkioctomap.h"
 #include "markerarray_pub.h"
+#include "osm_geometry.h"
 
 class MCDData {
   public:
@@ -208,7 +209,31 @@ class MCDData {
     // This is needed to align OSM data with the same coordinate frame
     Eigen::Matrix4d getOriginalFirstPose() const {
       return original_first_pose_;
-    } 
+    }
+
+    /// Set map visualization color mode: semantic class or OSM prior (building/road/grassland/tree).
+    void set_color_mode(semantic_bki::MapColorMode mode) {
+      if (m_pub_) m_pub_->set_color_mode(mode);
+    }
+
+    void set_osm_buildings(const std::vector<semantic_bki::Geometry2D> &buildings) {
+      if (map_) map_->set_osm_buildings(buildings);
+    }
+    void set_osm_roads(const std::vector<semantic_bki::Geometry2D> &roads) {
+      if (map_) map_->set_osm_roads(roads);
+    }
+    void set_osm_grasslands(const std::vector<semantic_bki::Geometry2D> &grasslands) {
+      if (map_) map_->set_osm_grasslands(grasslands);
+    }
+    void set_osm_trees(const std::vector<semantic_bki::Geometry2D> &trees) {
+      if (map_) map_->set_osm_trees(trees);
+    }
+    void set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points) {
+      if (map_) map_->set_osm_tree_points(tree_points);
+    }
+    void set_osm_decay_meters(float decay_m) {
+      if (map_) map_->set_osm_decay_meters(decay_m);
+    }
 
     bool process_scans(std::string input_data_dir, std::string input_label_dir, int scan_num, int skip_frames, bool query, bool visualize) {
       if (!map_) {
@@ -395,6 +420,7 @@ class MCDData {
         return;
       }
       
+      semantic_bki::MapColorMode mode = m_pub_->get_color_mode();
       int voxel_count = 0;
       int iter_count = 0;
       try {
@@ -409,9 +435,26 @@ class MCDData {
           try {
             auto node = it.get_node();
             
-            if (node.get_state() == semantic_bki::State::OCCUPIED) {
+              if (node.get_state() == semantic_bki::State::OCCUPIED) {
               semantic_bki::point3f p = it.get_loc();
-              m_pub_->insert_point3d_semantics(p.x(), p.y(), p.z(), it.get_size(), node.get_semantics(), 2);
+              float size = it.get_size();
+              if (mode == semantic_bki::MapColorMode::Semantic) {
+                m_pub_->insert_point3d_semantics(p.x(), p.y(), p.z(), size, node.get_semantics(), 2);
+              } else if (mode == semantic_bki::MapColorMode::OSMBlend) {
+                m_pub_->insert_point3d_osm_blend(p.x(), p.y(), p.z(), size,
+                    node.get_osm_building(), node.get_osm_road(), node.get_osm_grassland(), node.get_osm_tree());
+              } else {
+                int prior_type = 0;
+                float value = 0.f;
+                switch (mode) {
+                  case semantic_bki::MapColorMode::OSMBuilding:   prior_type = 0; value = node.get_osm_building(); break;
+                  case semantic_bki::MapColorMode::OSMRoad:      prior_type = 1; value = node.get_osm_road(); break;
+                  case semantic_bki::MapColorMode::OSMGrassland:  prior_type = 2; value = node.get_osm_grassland(); break;
+                  case semantic_bki::MapColorMode::OSMTree:     prior_type = 3; value = node.get_osm_tree(); break;
+                  default: prior_type = 0; value = node.get_osm_building(); break;
+                }
+                m_pub_->insert_point3d_osm_prior(p.x(), p.y(), p.z(), size, value, prior_type);
+              }
               voxel_count++;
             }
             

@@ -24,14 +24,20 @@ namespace semantic_bki {
         /*
          * @brief Constructors and destructor.
          */
-        Semantics() : ms(std::vector<float>(num_class, prior)), state(State::UNKNOWN) { classified = false; }
+        Semantics() : ms(std::vector<float>(num_class, prior)), state(State::UNKNOWN),
+                      osm_building(0.f), osm_road(0.f), osm_grassland(0.f), osm_tree(0.f) { classified = false; }
 
-        Semantics(const Semantics &other) : ms(other.ms), state(other.state), semantics(other.semantics) { }
+        Semantics(const Semantics &other) : ms(other.ms), state(other.state), semantics(other.semantics),
+                      osm_building(other.osm_building), osm_road(other.osm_road), osm_grassland(other.osm_grassland), osm_tree(other.osm_tree) { }
 
         Semantics &operator=(const Semantics &other) {
           ms = other.ms;
           state = other.state;
           semantics = other.semantics;
+          osm_building = other.osm_building;
+          osm_road = other.osm_road;
+          osm_grassland = other.osm_grassland;
+          osm_tree = other.osm_tree;
           return *this;
         }
 
@@ -58,17 +64,31 @@ namespace semantic_bki {
 
         inline int get_semantics() const { return semantics; }
 
+        /// OSM prior values in [0,1]: building, road, grassland, tree (Euclidean signed-distance-based).
+        inline float get_osm_building() const { return osm_building; }
+        inline float get_osm_road() const { return osm_road; }
+        inline float get_osm_grassland() const { return osm_grassland; }
+        inline float get_osm_tree() const { return osm_tree; }
+        inline void set_osm_building(float v) { osm_building = v; }
+        inline void set_osm_road(float v) { osm_road = v; }
+        inline void set_osm_grassland(float v) { osm_grassland = v; }
+        inline void set_osm_tree(float v) { osm_tree = v; }
+
         bool classified;
 
     private:
         std::vector<float> ms;
         State state;
         int semantics;
-        static int num_class;      // number of classes
+        float osm_building;
+        float osm_road;
+        float osm_grassland;
+        float osm_tree;
+        static int num_class;   // number of classes
         
         static float sf2;
         static float ell;   // length-scale
-        static float prior;  // prior on each class
+        static float prior; // prior on each class
 
         static float var_thresh;
         static float free_thresh;     // FREE occupancy threshold

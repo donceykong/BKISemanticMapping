@@ -16,12 +16,9 @@
 #include <osmium/index/map/sparse_mem_array.hpp>
 #include <osmium/handler/node_locations_for_ways.hpp>
 #include <osmium/osm/location.hpp>
+#include "osm_geometry.h"
 
 namespace semantic_bki {
-
-    struct Geometry2D {
-        std::vector<std::pair<float, float>> coords;
-    };
 
     class OSMVisualizer {
     public:
@@ -71,6 +68,13 @@ namespace semantic_bki {
          * @return true if saved successfully
          */
         bool saveAsPNG(const std::string& output_path, int image_width = 2048, int image_height = 2048, int margin_pixels = 50);
+
+        /// Return OSM geometries (after transform if applied). Used to set voxel OSM priors.
+        const std::vector<Geometry2D>& getBuildings() const { return buildings_; }
+        const std::vector<Geometry2D>& getRoads() const { return roads_; }
+        const std::vector<Geometry2D>& getGrasslands() const { return grasslands_; }
+        const std::vector<Geometry2D>& getTrees() const { return trees_; }
+        const std::vector<std::pair<float, float>>& getTreePoints() const { return tree_points_; }
 
     private:
         /**

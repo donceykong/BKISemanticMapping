@@ -14,12 +14,17 @@
 #include <osmium/visitor.hpp>
 #include <osmium/osm/way.hpp>
 #include <osmium/osm/node.hpp>
+#include <osmium/osm/relation.hpp>
+#include <osmium/osm/area.hpp>
 #include <osmium/index/map/sparse_mem_array.hpp>
 #include <osmium/handler/node_locations_for_ways.hpp>
 #include <osmium/osm/location.hpp>
+#include <osmium/area/assembler.hpp>
+#include <osmium/area/multipolygon_manager.hpp>
+#include <osmium/tags/tags_filter.hpp>
 
 namespace {
-    // Handler class for extracting buildings, roads, sidewalks, grasslands, trees (ways + nodes) from OSM data using libosmium
+    // Handler class for extracting buildings, roads, sidewalks, grasslands, trees (ways + nodes + multipolygons) from OSM data using libosmium
     class OSMGeometryHandler : public osmium::handler::Handler {
     public:
         OSMGeometryHandler(double origin_lat, double origin_lon,
@@ -138,6 +143,102 @@ namespace {
             }
         }
 
+        // Handle areas (from multipolygons or closed ways) - called by MultipolygonManager
+        void area(const osmium::Area& area) {
+            // Check tags to determine type
+            const char* building_tag = area.tags()["building"];
+            if (building_tag) {
+                // Extract outer rings as separate polygons (each outer ring is a building)
+                for (const auto& outer_ring : area.outer_rings()) {
+                    semantic_bki::Geometry2D geom;
+                    for (const auto& node_ref : outer_ring) {
+                        const osmium::Location& location = node_ref.location();
+                        if (location.valid()) {
+                            double lat = location.lat();
+                            double lon = location.lon();
+                            float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
+                            float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
+                            geom.coords.push_back({x, y});
+                        }
+                    }
+                    // Note: inner rings (holes) are ignored for now - we treat multipolygons as filled polygons
+                    // To handle holes properly, we'd need to use a polygon-with-holes data structure
+                    if (geom.coords.size() >= 3) {
+                        buildings_.push_back(geom);
+                    }
+                }
+                return;
+            }
+
+            // Check for grassland/meadow areas
+            const char* landuse_tag = area.tags()["landuse"];
+            if (landuse_tag) {
+                std::string landuse(landuse_tag);
+                if (landuse == "grass" || landuse == "meadow" || landuse == "greenfield") {
+                    for (const auto& outer_ring : area.outer_rings()) {
+                        semantic_bki::Geometry2D geom;
+                        for (const auto& node_ref : outer_ring) {
+                            const osmium::Location& location = node_ref.location();
+                            if (location.valid()) {
+                                double lat = location.lat();
+                                double lon = location.lon();
+                                float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
+                                float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
+                                geom.coords.push_back({x, y});
+                            }
+                        }
+                        if (geom.coords.size() >= 3) {
+                            grasslands_.push_back(geom);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Check for forest/wood areas
+            const char* natural_tag = area.tags()["natural"];
+            if (natural_tag) {
+                std::string natural(natural_tag);
+                if (natural == "wood" || natural == "forest") {
+                    for (const auto& outer_ring : area.outer_rings()) {
+                        semantic_bki::Geometry2D geom;
+                        for (const auto& node_ref : outer_ring) {
+                            const osmium::Location& location = node_ref.location();
+                            if (location.valid()) {
+                                double lat = location.lat();
+                                double lon = location.lon();
+                                float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
+                                float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
+                                geom.coords.push_back({x, y});
+                            }
+                        }
+                        if (geom.coords.size() >= 3) {
+                            trees_.push_back(geom);
+                        }
+                    }
+                    return;
+                }
+            }
+            if (landuse_tag && std::string(landuse_tag) == "forest") {
+                for (const auto& outer_ring : area.outer_rings()) {
+                    semantic_bki::Geometry2D geom;
+                    for (const auto& node_ref : outer_ring) {
+                        const osmium::Location& location = node_ref.location();
+                        if (location.valid()) {
+                            double lat = location.lat();
+                            double lon = location.lon();
+                            float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
+                            float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
+                            geom.coords.push_back({x, y});
+                        }
+                    }
+                    if (geom.coords.size() >= 3) {
+                        trees_.push_back(geom);
+                    }
+                }
+            }
+        }
+
     private:
         double origin_lat_, origin_lon_;
         double kMetersPerDegLat_, kMetersPerDegLon_;
@@ -157,20 +258,25 @@ namespace semantic_bki {
             RCLCPP_ERROR_STREAM(rclcpp::get_logger("osm_visualizer"), "ERROR: OSMVisualizer constructor: node_ is null!");
             return;
         }
-        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: OSMVisualizer constructor: Creating publisher for topic: " << topic_);
-        // Use default QoS for ROS2 (compatible with ros2 topic hz and RViz)
-        // transient_local requires matching QoS on subscriber side, which ros2 topic hz doesn't use
-        // Use default reliable QoS instead for better compatibility
-        pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-            topic_, 
-            rclcpp::QoS(10).reliable());
-        if (!pub_) {
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: Failed to create OSM publisher!");
+        // Only create publisher if topic is not empty (allows using OSMVisualizer just for loading/transforming OSM data)
+        if (!topic_.empty()) {
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: OSMVisualizer constructor: Creating publisher for topic: " << topic_);
+            // Use default QoS for ROS2 (compatible with ros2 topic hz and RViz)
+            // transient_local requires matching QoS on subscriber side, which ros2 topic hz doesn't use
+            // Use default reliable QoS instead for better compatibility
+            pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+                topic_, 
+                rclcpp::QoS(10).reliable());
+            if (!pub_) {
+                RCLCPP_ERROR_STREAM(node_->get_logger(), "ERROR: Failed to create OSM publisher!");
+            } else {
+                // RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: OSM publisher created successfully");
+                // RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher topic name: " << pub_->get_topic_name());
+                // RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher subscription count: " << pub_->get_subscription_count());
+                // RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Publisher created for topic: " << topic_ << " with reliable QoS");
+            }
         } else {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: OSM publisher created successfully");
-            RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher topic name: " << pub_->get_topic_name());
-            RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher subscription count: " << pub_->get_subscription_count());
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Publisher created for topic: " << topic_ << " with reliable QoS");
+            pub_ = nullptr;  // No publisher needed if topic is empty
         }
     }
 
@@ -181,12 +287,11 @@ namespace semantic_bki {
         trees_.clear();
         tree_points_.clear();
         
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer::loadFromOSM called with file: " << osm_file);
-        RCLCPP_INFO_STREAM(node_->get_logger(), "  Origin: (" << origin_lat << ", " << origin_lon << ")");
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer::loadFromOSM called with file: " << osm_file);
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "  Origin: (" << origin_lat << ", " << origin_lon << ")");
         
         try {
             osmium::io::File input_file(osm_file);
-            osmium::io::Reader reader(input_file);
             
             // Create index to store node locations
             osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location> index;
@@ -195,17 +300,54 @@ namespace semantic_bki {
             osmium::handler::NodeLocationsForWays<osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>> 
                 location_handler(index);
             
-            // Create handler to extract buildings, roads, sidewalks, grasslands, trees (ways + point trees)
+            // Create handler to extract buildings, roads, sidewalks, grasslands, trees (ways + point trees + multipolygons)
             OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_, grasslands_, trees_, tree_points_);
             
-            // Apply handlers: first store node locations, then process ways
-            osmium::apply(reader, location_handler, handler);
-            reader.close();
+            // MultipolygonManager to convert multipolygon relations to areas
+            // Configure assembler and filter for multipolygons (buildings, landuse, natural)
+            osmium::area::AssemblerConfig assembler_config;
+            osmium::TagsFilter filter(false);  // Start with false (reject all)
+            filter.add_rule(true, "building");  // Accept buildings
+            filter.add_rule(true, "landuse", "grass");
+            filter.add_rule(true, "landuse", "meadow");
+            filter.add_rule(true, "landuse", "greenfield");
+            filter.add_rule(true, "landuse", "forest");
+            filter.add_rule(true, "natural", "grassland");
+            filter.add_rule(true, "natural", "heath");
+            filter.add_rule(true, "natural", "scrub");
+            filter.add_rule(true, "natural", "wood");
+            filter.add_rule(true, "natural", "forest");
+            using MultipolygonManager = osmium::area::MultipolygonManager<osmium::area::Assembler>;
+            MultipolygonManager mp_manager(assembler_config, filter);
             
-            RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings, " << roads_.size() << " roads/sidewalks, " << grasslands_.size() << " grasslands, " << trees_.size() << " tree/forest polygons, " << tree_points_.size() << " tree points from OSM file using libosmium");
+            // First pass: read all objects
+            // - location_handler stores node locations
+            // - handler processes ways and nodes (buildings, roads, etc. as simple ways)
+            // - mp_manager collects multipolygon relations and their member ways
+            osmium::io::Reader reader1(input_file);
+            osmium::apply(reader1, location_handler, handler, mp_manager);
+            reader1.close();
+            
+            // Prepare MultipolygonManager for second pass (required before lookup)
+            mp_manager.prepare_for_lookup();
+            
+            // Second pass: read again, MultipolygonManager outputs completed areas (multipolygons)
+            osmium::io::Reader reader2(input_file);
+            osmium::apply(reader2, location_handler, mp_manager.handler([&handler](osmium::memory::Buffer&& buffer) {
+                // This callback receives buffers containing completed areas (multipolygons)
+                // Process only areas - handler.area() will be called for each area
+                for (const auto& item : buffer) {
+                    if (item.type() == osmium::item_type::area) {
+                        handler.area(static_cast<const osmium::Area&>(item));
+                    }
+                }
+            }));
+            reader2.close();
+            
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings, " << roads_.size() << " roads/sidewalks, " << grasslands_.size() << " grasslands, " << trees_.size() << " tree/forest polygons, " << tree_points_.size() << " tree points from OSM file using libosmium");
             
             if (buildings_.empty() && roads_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
-                RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings, roads, grasslands, or trees found in OSM file.");
+                // RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings, roads, grasslands, or trees found in OSM file.");
             }
             
             size_t total_building_points = 0, total_road_points = 0, total_grass_points = 0, total_tree_points = 0;
@@ -213,7 +355,7 @@ namespace semantic_bki {
             for (const auto& r : roads_) total_road_points += r.coords.size();
             for (const auto& g : grasslands_) total_grass_points += g.coords.size();
             for (const auto& t : trees_) total_tree_points += t.coords.size();
-            RCLCPP_INFO_STREAM(node_->get_logger(), "Total points - buildings: " << total_building_points << ", roads: " << total_road_points << ", grasslands: " << total_grass_points << ", tree polygons: " << total_tree_points << ", tree points: " << tree_points_.size());
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "Total points - buildings: " << total_building_points << ", roads: " << total_road_points << ", grasslands: " << total_grass_points << ", tree polygons: " << total_tree_points << ", tree points: " << tree_points_.size());
             
             return true;
         } catch (const std::exception& e) {
@@ -250,7 +392,7 @@ namespace semantic_bki {
                 }
             }
             if (has_invalid) {
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping building polygon with invalid (NaN/Inf) coordinates");
+                // RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping building polygon with invalid (NaN/Inf) coordinates");
                 continue;
             }
             
@@ -304,7 +446,7 @@ namespace semantic_bki {
                 }
             }
             if (has_invalid) {
-                RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping road polyline with invalid (NaN/Inf) coordinates");
+                // RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping road polyline with invalid (NaN/Inf) coordinates");
                 continue;
             }
             
@@ -467,7 +609,7 @@ namespace semantic_bki {
     }
 
     void OSMVisualizer::publish() {
-        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: publish() called, buildings_.size()=" << buildings_.size());
+        // RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: publish() called, buildings_.size()=" << buildings_.size());
         
         if (!pub_) {
             RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Cannot publish - publisher is null!");
@@ -479,50 +621,50 @@ namespace semantic_bki {
             return;
         }
         
-        RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher and node are valid, creating marker array");
+        // RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: Publisher and node are valid, creating marker array");
         visualization_msgs::msg::MarkerArray marker_array;
         
         if (!buildings_.empty()) {
             auto marker = createBuildingMarker(buildings_);
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << buildings_.size() << " buildings with " << marker.points.size() << " line points");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << buildings_.size() << " buildings with " << marker.points.size() << " line points");
         } else {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No buildings loaded! buildings_.size()=" << buildings_.size());
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No buildings loaded! buildings_.size()=" << buildings_.size());
         }
         
         if (!roads_.empty()) {
             auto marker = createRoadMarker(roads_);
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << roads_.size() << " roads/sidewalks with " << marker.points.size() << " line points");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << roads_.size() << " roads/sidewalks with " << marker.points.size() << " line points");
         } else {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No roads loaded! roads_.size()=" << roads_.size());
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No roads loaded! roads_.size()=" << roads_.size());
         }
         
         if (!grasslands_.empty()) {
             auto marker = createGrasslandMarker(grasslands_);
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << grasslands_.size() << " grasslands with " << marker.points.size() << " line points");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << grasslands_.size() << " grasslands with " << marker.points.size() << " line points");
         }
         
         if (!trees_.empty()) {
             auto marker = createTreeMarker(trees_);
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << trees_.size() << " trees/forests with " << marker.points.size() << " line points");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << trees_.size() << " trees/forests with " << marker.points.size() << " line points");
         }
         if (!tree_points_.empty()) {
             auto marker = createTreePointsMarker();
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << tree_points_.size() << " tree points (single-node trees)");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << tree_points_.size() << " tree points (single-node trees)");
         }
         
         if (!path_.empty()) {
             auto marker = createPathMarker();
             marker_array.markers.push_back(marker);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added lidar path with " << path_.size() << " points");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added lidar path with " << path_.size() << " points");
         }
         
         if (marker_array.markers.empty()) {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ", path=" << path_.size() << ")");
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ", path=" << path_.size() << ")");
             return;
         }
         
@@ -540,12 +682,12 @@ namespace semantic_bki {
         for (const auto& m : marker_array.markers) {
             total_points += m.points.size();
         }
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Publishing " << marker_array.markers.size() << " marker(s) (buildings + roads) with " << total_points << " total line points to topic " << topic_ << " in frame " << frame_id_);
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer: Publishing " << marker_array.markers.size() << " marker(s) (buildings + roads) with " << total_points << " total line points to topic " << topic_ << " in frame " << frame_id_);
         
         // Log marker details and bounding box for debugging
         if (!marker_array.markers.empty()) {
             const auto& first_marker = marker_array.markers[0];
-            RCLCPP_INFO_STREAM(node_->get_logger(), "First marker: ns=" << first_marker.ns << ", id=" << first_marker.id << ", type=" << first_marker.type << ", points=" << first_marker.points.size() << ", frame=" << first_marker.header.frame_id);
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "First marker: ns=" << first_marker.ns << ", id=" << first_marker.id << ", type=" << first_marker.type << ", points=" << first_marker.points.size() << ", frame=" << first_marker.header.frame_id);
             
             // Calculate bounding box of marker points
             if (!first_marker.points.empty()) {
@@ -559,31 +701,35 @@ namespace semantic_bki {
                     min_y = std::min(min_y, static_cast<float>(pt.y));
                     max_y = std::max(max_y, static_cast<float>(pt.y));
                 }
-                RCLCPP_INFO_STREAM(node_->get_logger(), "Marker bounds: X=[" << min_x << ", " << max_x << "], Y=[" << min_y << ", " << max_y << "]");
-                RCLCPP_INFO_STREAM(node_->get_logger(), "First point: [" << first_marker.points[0].x << ", " << first_marker.points[0].y << ", " << first_marker.points[0].z << "]");
+                // RCLCPP_INFO_STREAM(node_->get_logger(), "Marker bounds: X=[" << min_x << ", " << max_x << "], Y=[" << min_y << ", " << max_y << "]");
+                // RCLCPP_INFO_STREAM(node_->get_logger(), "First point: [" << first_marker.points[0].x << ", " << first_marker.points[0].y << ", " << first_marker.points[0].z << "]");
             }
         }
         
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: About to publish MarkerArray with " << marker_array.markers.size() << " markers");
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Publisher valid: " << (pub_ ? "YES" : "NO"));
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Topic: " << topic_);
+        // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: About to publish MarkerArray with " << marker_array.markers.size() << " markers");
+        // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Publisher valid: " << (pub_ ? "YES" : "NO"));
+        // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Topic: " << topic_);
         
         try {
             pub_->publish(marker_array);
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Successfully published MarkerArray to " << topic_ << " with " << marker_array.markers.size() << " markers");
+            // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Successfully published MarkerArray to " << topic_ << " with " << marker_array.markers.size() << " markers");
         } catch (const std::exception& e) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "OSMVisualizer: Exception while publishing: " << e.what());
         }
     }
 
     void OSMVisualizer::startPeriodicPublishing(double rate) {
+        if (!pub_) {
+            RCLCPP_WARN(node_->get_logger(), "OSMVisualizer: Cannot start periodic publishing - no publisher (topic was empty)");
+            return;
+        }
         if (rate <= 0.0) {
-            RCLCPP_WARN(node_->get_logger(), "OSMVisualizer: Invalid publishing rate, using default 1.0 Hz");
+            // RCLCPP_WARN(node_->get_logger(), "OSMVisualizer: Invalid publishing rate, using default 1.0 Hz");
             rate = 1.0;
         }
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Creating timer for periodic publishing at " << rate << " Hz");
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Node pointer: " << node_.get() << ", this pointer: " << this);
-        RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Publisher pointer: " << pub_.get() << ", Publisher count: " << pub_.use_count());
+        // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Creating timer for periodic publishing at " << rate << " Hz");
+        // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Node pointer: " << node_.get() << ", this pointer: " << this);
+        // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Publisher pointer: " << pub_.get() << ", Publisher count: " << pub_.use_count());
         
         publish_timer_ = node_->create_wall_timer(
             std::chrono::milliseconds(static_cast<int>(1000.0 / rate)),
@@ -591,17 +737,17 @@ namespace semantic_bki {
                 this->timerCallback();
             });
         if (!publish_timer_) {
-            RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Failed to create publishing timer!");
+            // RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Failed to create publishing timer!");
         } else {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer created successfully, periodic publishing started at " << rate << " Hz");
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer will fire every " << (1000.0 / rate) << " ms");
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer pointer: " << publish_timer_.get() << ", Timer count: " << publish_timer_.use_count());
+            // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer created successfully, periodic publishing started at " << rate << " Hz");
+            // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer will fire every " << (1000.0 / rate) << " ms");
+            // // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer pointer: " << publish_timer_.get() << ", Timer count: " << publish_timer_.use_count());
         }
     }
 
     void OSMVisualizer::timerCallback() {
         try {
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
             if (!node_) {
                 RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - node_ is null!");
                 return;
@@ -614,9 +760,9 @@ namespace semantic_bki {
                 RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - publish_timer_ is null!");
                 return;
             }
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: About to call publish(), pub_ count: " << pub_.use_count());
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: About to call publish(), pub_ count: " << pub_.use_count());
             publish();
-            RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback completed successfully, markers published");
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback completed successfully, markers published");
         } catch (const std::exception& e) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "OSMVisualizer: Exception in timer callback: " << e.what());
         } catch (...) {
@@ -627,7 +773,7 @@ namespace semantic_bki {
     void OSMVisualizer::transformToFirstPoseOrigin(const Eigen::Matrix4d& first_pose) {
         // Prevent multiple transformations
         if (transformed_) {
-            RCLCPP_WARN(node_->get_logger(), "OSM data has already been transformed. Skipping additional transformation to prevent double transformation.");
+            // RCLCPP_WARN(node_->get_logger(), "OSM data has already been transformed. Skipping additional transformation to prevent double transformation.");
             return;
         }
         
@@ -636,9 +782,9 @@ namespace semantic_bki {
         // So we first add first_pose translation to get world coords, then apply first_pose_inverse.
         Eigen::Matrix4d first_pose_inverse = first_pose.inverse();
         
-        RCLCPP_INFO_STREAM(node_->get_logger(), "Transforming OSM geometries to be relative to first pose (same as ROS1_ORIG)...");
-        RCLCPP_INFO_STREAM(node_->get_logger(), "First pose translation: [" << first_pose(0,3) << ", " << first_pose(1,3) << ", " << first_pose(2,3) << "]");
-        RCLCPP_INFO_STREAM(node_->get_logger(), "Step 1: local_to_world = point + first_pose_translation; Step 2: map = first_pose_inverse * world");
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "Transforming OSM geometries to be relative to first pose (same as ROS1_ORIG)...");
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "First pose translation: [" << first_pose(0,3) << ", " << first_pose(1,3) << ", " << first_pose(2,3) << "]");
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "Step 1: local_to_world = point + first_pose_translation; Step 2: map = first_pose_inverse * world");
         
         auto transformPoint = [&first_pose, &first_pose_inverse](float& x, float& y) {
             // Local (relative to origin_latlon) -> world: add first pose translation (as in create_scan_osm_topdown.py)
@@ -716,17 +862,17 @@ namespace semantic_bki {
                     max_y_after = std::max(max_y_after, coord.second);
                 }
             }
-            RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries AFTER transform - Bounds: [" << min_x_after << ", " << min_y_after << "] to [" << max_x_after << ", " << max_y_after << "]");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries AFTER transform - Bounds: [" << min_x_after << ", " << min_y_after << "] to [" << max_x_after << ", " << max_y_after << "]");
         }
         
         transformed_ = true;
         
-        RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries (buildings, roads, grasslands, trees) transformed to first pose origin frame.");
+        // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries (buildings, roads, grasslands, trees) transformed to first pose origin frame.");
     }
 
     bool OSMVisualizer::saveAsPNG(const std::string& output_path, int image_width, int image_height, int margin_pixels) {
         if (buildings_.empty() && roads_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty() && path_.empty()) {
-            RCLCPP_WARN(node_->get_logger(), "No buildings, roads, grasslands, trees, tree points, or path to render in PNG");
+            // RCLCPP_WARN(node_->get_logger(), "No buildings, roads, grasslands, trees, tree points, or path to render in PNG");
             return false;
         }
 
@@ -918,9 +1064,9 @@ namespace semantic_bki {
         // Save image
         bool success = cv::imwrite(output_path, image);
         if (success) {
-            RCLCPP_INFO_STREAM(node_->get_logger(), "Saved OSM visualization to: " << output_path);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "  Image size: " << image_width << "x" << image_height);
-            RCLCPP_INFO_STREAM(node_->get_logger(), "  Buildings: " << buildings_.size() << ", Roads: " << roads_.size() << ", Grasslands: " << grasslands_.size() << ", Trees: " << trees_.size());
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "Saved OSM visualization to: " << output_path);
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "  Image size: " << image_width << "x" << image_height);
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "  Buildings: " << buildings_.size() << ", Roads: " << roads_.size() << ", Grasslands: " << grasslands_.size() << ", Trees: " << trees_.size());
         } else {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to save PNG image to: " << output_path);
         }

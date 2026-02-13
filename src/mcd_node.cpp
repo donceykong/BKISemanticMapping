@@ -15,6 +15,7 @@
 #include "bkioctomap.h"
 #include "markerarray_pub.h"
 #include "mcd_util.h"
+#include "osm_visualizer.h"
 
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
@@ -78,6 +79,11 @@ int main(int argc, char **argv) {
     node->declare_parameter<bool>("visualize", visualize);
     node->declare_parameter<std::string>("colors_file", "");
     node->declare_parameter<std::string>("calibration_file", "");
+    node->declare_parameter<std::string>("color_mode", "semantic");
+    node->declare_parameter<std::string>("osm_file", "");
+    node->declare_parameter<double>("osm_origin_lat", 0.0);
+    node->declare_parameter<double>("osm_origin_lon", 0.0);
+    node->declare_parameter<double>("osm_decay_meters", 2.0);
 
     // Get parameters
     node->get_parameter<std::string>("map_topic", map_topic);
@@ -111,8 +117,19 @@ int main(int argc, char **argv) {
     // Calibration file
     std::string calibration_file;
     node->get_parameter<std::string>("calibration_file", calibration_file);
+
+    // Visualization color mode: "semantic" | "osm_building" | "osm_road" | "osm_grassland" | "osm_tree"
+    std::string color_mode_str;
+    node->get_parameter<std::string>("color_mode", color_mode_str);
+
+    std::string osm_file;
+    double osm_origin_lat, osm_origin_lon, osm_decay_meters;
+    node->get_parameter<std::string>("osm_file", osm_file);
+    node->get_parameter<double>("osm_origin_lat", osm_origin_lat);
+    node->get_parameter<double>("osm_origin_lon", osm_origin_lon);
+    node->get_parameter<double>("osm_decay_meters", osm_decay_meters);
     
-    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: All parameters retrieved. dir=" << dir << ", lidar_pose_file=" << lidar_pose_file << ", calibration_file=" << calibration_file);
+    RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: All parameters retrieved. dir=" << dir << ", lidar_pose_file=" << lidar_pose_file << ", calibration_file=" << calibration_file << ", color_mode=" << color_mode_str);
 
     RCLCPP_INFO_STREAM(node->get_logger(), "Parameters:" << std::endl <<
       "block_depth: " << block_depth << std::endl <<
@@ -211,6 +228,48 @@ int main(int argc, char **argv) {
       }
     }
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Color loading completed");
+
+    // Set visualization color mode
+    if (color_mode_str == "osm_building") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMBuilding);
+    } else if (color_mode_str == "osm_road") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMRoad);
+    } else if (color_mode_str == "osm_grassland") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMGrassland);
+    } else if (color_mode_str == "osm_tree") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMTree);
+    } else if (color_mode_str == "osm_blend") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMBlend);
+    } else {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::Semantic);
+    }
+
+    mcd_data.set_osm_decay_meters(static_cast<float>(osm_decay_meters));
+
+    // Optional: load OSM geometries for voxel priors (same frame as map)
+    if (!osm_file.empty()) {
+      std::string full_osm_path = osm_file;
+      if (osm_file[0] != '/' && !dir.empty()) {
+        full_osm_path = dir + "/" + osm_file;
+      }
+      semantic_bki::OSMVisualizer osm_vis(node, "");
+      if (osm_vis.loadFromOSM(full_osm_path, osm_origin_lat, osm_origin_lon)) {
+        osm_vis.transformToFirstPoseOrigin(mcd_data.getOriginalFirstPose());
+        mcd_data.set_osm_buildings(osm_vis.getBuildings());
+        mcd_data.set_osm_roads(osm_vis.getRoads());
+        mcd_data.set_osm_grasslands(osm_vis.getGrasslands());
+        mcd_data.set_osm_trees(osm_vis.getTrees());
+        mcd_data.set_osm_tree_points(osm_vis.getTreePoints());
+        RCLCPP_INFO_STREAM(node->get_logger(), "Loaded OSM geometries for voxel priors: " 
+            << osm_vis.getBuildings().size() << " buildings, " 
+            << osm_vis.getRoads().size() << " roads, "
+            << osm_vis.getGrasslands().size() << " grasslands, "
+            << osm_vis.getTrees().size() << " tree polygons, "
+            << osm_vis.getTreePoints().size() << " tree points (decay=" << osm_decay_meters << " m)");
+      } else {
+        RCLCPP_WARN_STREAM(node->get_logger(), "Failed to load OSM file for priors: " << full_osm_path);
+      }
+    }
 
     // Process scans
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to set up evaluation");

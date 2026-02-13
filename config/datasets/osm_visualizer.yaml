@@ -3,7 +3,7 @@
 
 /**:
   ros__parameters:
-    osm_file: kth_large.osm  # Path (relative to data/mcd/ or absolute)
+    osm_file: kth.osm  # Path (relative to data/mcd/ or absolute)
     osm_origin_lat: 59.348268650
     osm_origin_lon: 18.073204280
     publish_rate: 2.0

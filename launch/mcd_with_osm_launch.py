@@ -34,11 +34,46 @@ def generate_launch_description():
         description='OSM visualizer config dataset name'
     )
     
+    color_mode_arg = DeclareLaunchArgument(
+        'color_mode',
+        default_value='semantic',
+        description='Visualization color mode: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_blend (all priors blended)'
+    )
+    
+    osm_file_arg = DeclareLaunchArgument(
+        'osm_file',
+        default_value='',
+        description='Path to OSM file (relative to data dir or absolute) for voxel priors. Empty to disable.'
+    )
+    
+    osm_origin_lat_arg = DeclareLaunchArgument(
+        'osm_origin_lat',
+        default_value='0.0',
+        description='OSM origin latitude (degrees)'
+    )
+    
+    osm_origin_lon_arg = DeclareLaunchArgument(
+        'osm_origin_lon',
+        default_value='0.0',
+        description='OSM origin longitude (degrees)'
+    )
+    
+    osm_decay_meters_arg = DeclareLaunchArgument(
+        'osm_decay_meters',
+        default_value='2.0',
+        description='OSM prior decay distance in meters'
+    )
+    
     return LaunchDescription([
         pkg_arg,
         method_arg,
         dataset_arg,
         osm_dataset_arg,
+        color_mode_arg,
+        osm_file_arg,
+        osm_origin_lat_arg,
+        osm_origin_lon_arg,
+        osm_decay_meters_arg,
         OpaqueFunction(function=launch_setup)
     ])
 
@@ -48,6 +83,11 @@ def launch_setup(context):
     method = context.launch_configurations.get('method', 'semantic_bki')
     dataset = context.launch_configurations.get('dataset', 'mcd')
     osm_dataset = context.launch_configurations.get('osm_dataset', 'osm_visualizer')
+    color_mode = context.launch_configurations.get('color_mode', 'semantic')
+    osm_file = context.launch_configurations.get('osm_file', '')
+    osm_origin_lat = context.launch_configurations.get('osm_origin_lat', '0.0')
+    osm_origin_lon = context.launch_configurations.get('osm_origin_lon', '0.0')
+    osm_decay_meters = context.launch_configurations.get('osm_decay_meters', '2.0')
     
     # Get package share directory
     pkg_share_dir = get_package_share_directory('semantic_bki')
@@ -69,21 +109,28 @@ def launch_setup(context):
         output='screen'
     )
     
-    # MCD node (scan processing)
+    # MCD node (scan processing) - now with OSM prior support
+    mcd_params = [
+        {'dir': data_dir_path},
+        {'calibration_file': calib_file_path},
+        {'color_mode': color_mode},  # Visualization color mode
+        {'osm_file': osm_file},  # OSM file path for voxel priors
+        {'osm_origin_lat': float(osm_origin_lat)},  # OSM origin latitude
+        {'osm_origin_lon': float(osm_origin_lon)},  # OSM origin longitude
+        {'osm_decay_meters': float(osm_decay_meters)},  # OSM prior decay distance
+        method_config_path,
+        data_config_path
+    ]
+    
     mcd_node = Node(
         package='semantic_bki',
         executable='mcd_node',
         name='mcd_node',
         output='screen',
-        parameters=[
-            {'dir': data_dir_path},
-            {'calibration_file': calib_file_path},
-            method_config_path,
-            data_config_path
-        ]
+        parameters=mcd_params
     )
     
-    # OSM visualizer node (independent, publishes OSM buildings)
+    # OSM visualizer node (independent, publishes OSM buildings/roads/etc. as markers)
     # Pass data_dir so pose file can be found relative to it
     osm_node = Node(
         package='semantic_bki',

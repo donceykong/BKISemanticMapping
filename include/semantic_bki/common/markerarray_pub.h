@@ -401,6 +401,59 @@ namespace semantic_bki {
         return color;
     }
 
+    /// Visualization mode: semantic class (from inference) or OSM prior (single or blended).
+    enum class MapColorMode {
+        Semantic,
+        OSMBuilding,
+        OSMRoad,
+        OSMGrassland,
+        OSMTree,
+        OSMBlend   /// All four OSM priors at once; overlapping weights blend colors
+    };
+
+    /// Color for OSM prior value in [0,1]: blend from light gray (0) to class color (1).
+    /// prior_type: 0=building, 1=road, 2=grassland, 3=tree.
+    inline std_msgs::msg::ColorRGBA OSMPriorMapColor(int prior_type, float value) {
+        std_msgs::msg::ColorRGBA color;
+        color.a = 1.0;
+        float g = 0.85f;  // light gray at 0
+        float r = g, b = g;
+        float cr = 0, cg = 0, cb = 0;
+        switch (prior_type) {
+            case 0: cr = 0.0f;  cg = 0.0f;  cb = 1.0f; break;   // building blue
+            case 1: cr = 1.0f;  cg = 0.0f;  cb = 0.0f; break;   // road red
+            case 2: cr = 0.4f;  cg = 0.85f; cb = 0.35f; break;  // grassland green
+            case 3: cr = 0.1f;  cg = 0.5f;  cb = 0.2f; break;   // tree dark green
+            default: cr = cg = cb = 0.5f; break;
+        }
+        value = std::max(0.f, std::min(1.f, value));
+        color.r = (1.f - value) * r + value * cr;
+        color.g = (1.f - value) * g + value * cg;
+        color.b = (1.f - value) * b + value * cb;
+        return color;
+    }
+
+    /// Blend the four OSM prior colors by weight. Weights in [0,1]. If all zero, returns light gray.
+    inline std_msgs::msg::ColorRGBA OSMPriorBlendColor(float w_building, float w_road, float w_grassland, float w_tree) {
+        std_msgs::msg::ColorRGBA color;
+        color.a = 1.0;
+        const float gray = 0.85f;
+        w_building  = std::max(0.f, std::min(1.f, w_building));
+        w_road      = std::max(0.f, std::min(1.f, w_road));
+        w_grassland = std::max(0.f, std::min(1.f, w_grassland));
+        w_tree      = std::max(0.f, std::min(1.f, w_tree));
+        float sum = w_building + w_road + w_grassland + w_tree;
+        if (sum <= 0.f) {
+            color.r = color.g = color.b = gray;
+            return color;
+        }
+        // Weighted blend: building=blue, road=red, grassland=light green, tree=dark green
+        color.r = (w_building * 0.f   + w_road * 1.f + w_grassland * 0.4f + w_tree * 0.1f) / sum;
+        color.g = (w_building * 0.f   + w_road * 0.f + w_grassland * 0.85f + w_tree * 0.5f) / sum;
+        color.b = (w_building * 1.f  + w_road * 0.f + w_grassland * 0.35f + w_tree * 0.2f) / sum;
+        return color;
+    }
+
     class MarkerArrayPub {
         typedef pcl::PointXYZ PointType;
         typedef pcl::PointCloud<PointType> PointCloud;
@@ -498,7 +551,39 @@ namespace semantic_bki {
             }
             msg_->markers[depth].colors.push_back(color);
         }
-        
+
+        /// Insert voxel colored by OSM prior value (0–1). prior_type: 0=building, 1=road, 2=grassland, 3=tree.
+        void insert_point3d_osm_prior(float x, float y, float z, float size, float value, int prior_type) {
+            geometry_msgs::msg::Point center;
+            center.x = x;
+            center.y = y;
+            center.z = z;
+            int depth = 0;
+            if (size > 0)
+                depth = (int) log2(size / 0.1);
+            depth = std::max(0, std::min(depth, (int)msg_->markers.size() - 1));
+            msg_->markers[depth].points.push_back(center);
+            msg_->markers[depth].colors.push_back(OSMPriorMapColor(prior_type, value));
+        }
+
+        /// Insert voxel colored by blending all four OSM prior weights (overlapping weights blend colors).
+        void insert_point3d_osm_blend(float x, float y, float z, float size, float w_building, float w_road, float w_grassland, float w_tree) {
+            geometry_msgs::msg::Point center;
+            center.x = x;
+            center.y = y;
+            center.z = z;
+            int depth = 0;
+            if (size > 0)
+                depth = (int) log2(size / 0.1);
+            depth = std::max(0, std::min(depth, (int)msg_->markers.size() - 1));
+            msg_->markers[depth].points.push_back(center);
+            msg_->markers[depth].colors.push_back(OSMPriorBlendColor(w_building, w_road, w_grassland, w_tree));
+        }
+
+        /// Set color mode for map visualization (semantic class vs OSM prior layer).
+        void set_color_mode(MapColorMode mode) { color_mode_ = mode; }
+        MapColorMode get_color_mode() const { return color_mode_; }
+
         // Load colors from YAML file
         bool load_colors_from_params(rclcpp::Node::SharedPtr node) {
             try {
@@ -660,6 +745,7 @@ namespace semantic_bki {
         std::string topic_;
         float resolution_;
         std::map<int, std_msgs::msg::ColorRGBA> color_map_;  // Class ID to color mapping
+        MapColorMode color_mode_{MapColorMode::Semantic};
     };
 
 }

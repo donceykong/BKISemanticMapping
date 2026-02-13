@@ -7,13 +7,13 @@
     num_class: 22 # Number of classes (MCD uses 29 classes)
 
     # Sampling resolutions
-    free_resolution: 200.0 # Free space sampling resolution
-    ds_resolution: 1.0 # Downsampling factor
+    free_resolution: 200.0  # Free space sampling resolution
+    ds_resolution: 1.0      # Downsampling factor
 
     # Information about range-finder data
-    scan_num: 10000 # How many scans to use
-    max_range: 200.0 # Sensor max range (m)
-    skip_frames: 10 # Number of frames to skip between insertions (0 = process every frame, 1 = process every other frame, etc.)
+    scan_num: 10000   # How many scans to use
+    max_range: 200.0  # Sensor max range (m)
+    skip_frames: 10   # Number of frames to skip between insertions (0 = process every frame, 1 = process every other frame, etc.)
 
     # Dataset information
     input_data_prefix: lidar_bin/data
