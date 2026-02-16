@@ -3,14 +3,14 @@
 /**:
   ros__parameters:
     # Map information
-    resolution: 1.0
+    resolution: 0.5
     # num_class = number of classes AND valid label index range [0, num_class-1]. Must be >= max_label_id + 1.
     # Semantic KITTI labels (0,1,10,11,...,99) -> use 100. MCD 0-21 -> use 22.
     num_class: 100
 
     # Sampling resolutions
     free_resolution: 200.0  # Free space sampling resolution
-    ds_resolution: 1.0      # Downsampling factor
+    ds_resolution: 0.5      # Downsampling factor
 
     # Information about range-finder data
     scan_num: 10000   # How many scans to use
@@ -19,7 +19,7 @@
 
     # Dataset information
     input_data_prefix: lidar_bin/data
-    input_label_prefix: inferred_labels_new
+    input_label_prefix: inferred_labels
     lidar_pose_file: pose_inW.csv
     gt_label_prefix: gt_labels
     evaluation_result_prefix: evaluations/
@@ -28,7 +28,7 @@
 
     # Visualization: show OSM priors colored (blend of building/road/grassland/tree). Use semantic for class colors.
     # Options: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_blend (all priors blended)
-    color_mode: osm_blend
+    color_mode: semantic
     # Color configuration (matters if color_mode is set to 'semantic)
     colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
 
@@ -36,7 +36,7 @@
     # OSM prior configuration 
     # --------------------------------
     # OSM prior decay: distance (m) over which prior drops from 1 to 0 away from OSM geometry
-    osm_decay_meters: 10.0
+    osm_decay_meters: 3.0
     # OSM file for voxel priors (path relative to data dir, or absolute). Must match osm_visualizer if using both.
     osm_file: kth.osm
     osm_origin_lat: 59.348268650
