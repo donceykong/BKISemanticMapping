@@ -84,6 +84,7 @@ int main(int argc, char **argv) {
     node->declare_parameter<double>("osm_origin_lat", 0.0);
     node->declare_parameter<double>("osm_origin_lon", 0.0);
     node->declare_parameter<double>("osm_decay_meters", 2.0);
+    node->declare_parameter<double>("osm_tree_point_radius_meters", 5.0);
 
     // Get parameters
     node->get_parameter<std::string>("map_topic", map_topic);
@@ -123,11 +124,12 @@ int main(int argc, char **argv) {
     node->get_parameter<std::string>("color_mode", color_mode_str);
 
     std::string osm_file;
-    double osm_origin_lat, osm_origin_lon, osm_decay_meters;
+    double osm_origin_lat, osm_origin_lon, osm_decay_meters, osm_tree_point_radius_meters;
     node->get_parameter<std::string>("osm_file", osm_file);
     node->get_parameter<double>("osm_origin_lat", osm_origin_lat);
     node->get_parameter<double>("osm_origin_lon", osm_origin_lon);
     node->get_parameter<double>("osm_decay_meters", osm_decay_meters);
+    node->get_parameter<double>("osm_tree_point_radius_meters", osm_tree_point_radius_meters);
     
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: All parameters retrieved. dir=" << dir << ", lidar_pose_file=" << lidar_pose_file << ", calibration_file=" << calibration_file << ", color_mode=" << color_mode_str);
 
@@ -238,6 +240,10 @@ int main(int argc, char **argv) {
       mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMGrassland);
     } else if (color_mode_str == "osm_tree") {
       mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMTree);
+    } else if (color_mode_str == "osm_parking") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMParking);
+    } else if (color_mode_str == "osm_fence") {
+      mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMFence);
     } else if (color_mode_str == "osm_blend") {
       mcd_data.set_color_mode(semantic_bki::MapColorMode::OSMBlend);
     } else {
@@ -245,6 +251,7 @@ int main(int argc, char **argv) {
     }
 
     mcd_data.set_osm_decay_meters(static_cast<float>(osm_decay_meters));
+    mcd_data.set_osm_tree_point_radius(static_cast<float>(osm_tree_point_radius_meters));
 
     // Optional: load OSM geometries for voxel priors (same frame as map)
     if (!osm_file.empty()) {
@@ -260,9 +267,13 @@ int main(int argc, char **argv) {
         mcd_data.set_osm_grasslands(osm_vis.getGrasslands());
         mcd_data.set_osm_trees(osm_vis.getTrees());
         mcd_data.set_osm_tree_points(osm_vis.getTreePoints());
+        mcd_data.set_osm_parking(osm_vis.getParking());
+        mcd_data.set_osm_fences(osm_vis.getFences());
         RCLCPP_INFO_STREAM(node->get_logger(), "Loaded OSM geometries for voxel priors: " 
             << osm_vis.getBuildings().size() << " buildings, " 
             << osm_vis.getRoads().size() << " roads, "
+            << osm_vis.getParking().size() << " parking, "
+            << osm_vis.getFences().size() << " fences, "
             << osm_vis.getGrasslands().size() << " grasslands, "
             << osm_vis.getTrees().size() << " tree polygons, "
             << osm_vis.getTreePoints().size() << " tree points (decay=" << osm_decay_meters << " m)");

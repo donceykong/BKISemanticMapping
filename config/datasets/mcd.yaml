@@ -27,12 +27,12 @@
     visualize: true
 
     # Visualization: show OSM priors colored (blend of building/road/grassland/tree). Use semantic for class colors.
-    # Options: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_blend (all priors blended)
+    # Options: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_parking, osm_fence, osm_blend (all priors blended)
     color_mode: osm_blend
     # Color configuration (matters if color_mode is set to 'semantic)
     colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
 
-    # -------------------------------- 
+    # --------------------------------
     # OSM prior configuration 
     # --------------------------------
     # OSM prior decay: distance (m) over which prior drops from 1 to 0 away from OSM geometry
@@ -41,3 +41,5 @@
     osm_file: kth.osm
     osm_origin_lat: 59.348268650
     osm_origin_lon: 18.073204280
+    # Tree points (natural=tree nodes): prior projected as 2D circles with this radius (meters). Same as osm_visualizer tree_point_radius_meters.
+    osm_tree_point_radius_meters: 5.0

@@ -8,6 +8,12 @@
     osm_origin_lon: 18.073204280
     publish_rate: 2.0
     topic: /osm_geometries
+
+    # Tree points (natural=tree nodes): drawn as 2D circles with this radius (meters). Same value used for prior projection.
+    tree_point_radius_meters: 5.0
+    # Stairs (highway=steps): each polyline segment drawn as rectangle with this width (meters) perpendicular to segment.
+    stairs_width_meters: 6.0
+
     # Optional: Transform OSM data to first pose origin (so both start at 0,0,0)
     lidar_pose_file: pose_inW.csv  # Pose file path (relative to data_dir or absolute)
     data_dir: ""  # Data directory (if empty, will try package share/data/mcd/)

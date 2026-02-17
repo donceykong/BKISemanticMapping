@@ -21,6 +21,8 @@ int main(int argc, char** argv) {
     node->declare_parameter<double>("osm_origin_lon", 18.073204280);
     node->declare_parameter<double>("publish_rate", 2.0);
     node->declare_parameter<std::string>("topic", "/osm_geometries");
+    node->declare_parameter<double>("tree_point_radius_meters", 5.0);
+    node->declare_parameter<double>("stairs_width_meters", 1.5);
     node->declare_parameter<std::string>("lidar_pose_file", "");
     node->declare_parameter<std::string>("data_dir", "");
 
@@ -28,6 +30,8 @@ int main(int argc, char** argv) {
     double osm_origin_lat, osm_origin_lon;
     double publish_rate;
     std::string topic;
+    double tree_point_radius_meters;
+    double stairs_width_meters;
     std::string lidar_pose_file;
     std::string data_dir;
     node->get_parameter("osm_file", osm_file);
@@ -35,6 +39,8 @@ int main(int argc, char** argv) {
     node->get_parameter("osm_origin_lon", osm_origin_lon);
     node->get_parameter("publish_rate", publish_rate);
     node->get_parameter("topic", topic);
+    node->get_parameter("tree_point_radius_meters", tree_point_radius_meters);
+    node->get_parameter("stairs_width_meters", stairs_width_meters);
     node->get_parameter("lidar_pose_file", lidar_pose_file);
     node->get_parameter("data_dir", data_dir);
 
@@ -58,6 +64,8 @@ int main(int argc, char** argv) {
     RCLCPP_INFO_STREAM(node->get_logger(), "  Origin: (" << osm_origin_lat << ", " << osm_origin_lon << "), Topic: " << topic);
 
     semantic_bki::OSMVisualizer visualizer(node, topic);
+    visualizer.setTreePointRadius(static_cast<float>(tree_point_radius_meters));
+    visualizer.setStairsWidth(static_cast<float>(stairs_width_meters));
     if (!visualizer.loadFromOSM(full_path, osm_origin_lat, osm_origin_lon)) {
         RCLCPP_ERROR(node->get_logger(), "Failed to load OSM file.");
         return 1;
