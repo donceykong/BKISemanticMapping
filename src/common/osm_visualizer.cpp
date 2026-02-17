@@ -30,11 +30,16 @@ namespace {
         OSMGeometryHandler(double origin_lat, double origin_lon,
                           std::vector<semantic_bki::Geometry2D>& buildings,
                           std::vector<semantic_bki::Geometry2D>& roads,
+                          std::vector<semantic_bki::Geometry2D>& sidewalks,
+                          std::vector<semantic_bki::Geometry2D>& parking,
+                          std::vector<semantic_bki::Geometry2D>& fences,
+                          std::vector<semantic_bki::Geometry2D>& stairs,
                           std::vector<semantic_bki::Geometry2D>& grasslands,
                           std::vector<semantic_bki::Geometry2D>& trees,
                           std::vector<std::pair<float, float>>& tree_points)
             : origin_lat_(origin_lat), origin_lon_(origin_lon),
-              buildings_(buildings), roads_(roads), grasslands_(grasslands), trees_(trees), tree_points_(tree_points) {
+              buildings_(buildings), roads_(roads), sidewalks_(sidewalks), parking_(parking), fences_(fences), stairs_(stairs),
+              grasslands_(grasslands), trees_(trees), tree_points_(tree_points) {
             kMetersPerDegLat_ = 110540.0;
             kMetersPerDegLon_ = 111320.0 * std::cos(origin_lat * M_PI / 180.0);
         }
@@ -84,8 +89,41 @@ namespace {
                 return;
             }
 
-            // Check if this way is a road or sidewalk
+            // --- PARKING (ways) ---
+            const char* amenity_tag = way.tags()["amenity"];
+            if (amenity_tag && std::string(amenity_tag) == "parking") {
+                parking_.push_back(geom);
+                return;
+            }
+            if (amenity_tag && std::string(amenity_tag) == "parking_space") {
+                parking_.push_back(geom);
+                return;
+            }
+
+            // --- FENCES (barrier=fence polylines) ---
+            const char* barrier_tag = way.tags()["barrier"];
+            if (barrier_tag && std::string(barrier_tag) == "fence") {
+                fences_.push_back(geom);
+                return;
+            }
+
+            // --- STAIRS (highway=steps) ---
             const char* highway_tag = way.tags()["highway"];
+            if (highway_tag && std::string(highway_tag) == "steps") {
+                stairs_.push_back(geom);
+                return;
+            }
+
+            // --- SIDEWALKS (separate geometries: highway=footway + footway=sidewalk) ---
+            const char* footway_tag = way.tags()["footway"];
+            if (highway_tag && std::string(highway_tag) == "footway") {
+                if (footway_tag && std::string(footway_tag) == "sidewalk") {
+                    sidewalks_.push_back(geom);
+                    return;
+                }
+            }
+
+            // --- ROADS / PATHS ---
             if (highway_tag) {
                 std::string highway(highway_tag);
                 if (highway == "motorway" || highway == "trunk" || highway == "primary" ||
@@ -98,13 +136,15 @@ namespace {
                     highway == "road" || highway == "cycleway" ||
                     highway == "footway" || highway == "path" || highway == "foot") {
                     roads_.push_back(geom);
+                    // Sidewalks mapped as tags on road centerline (sidewalk=both/left/right)
+                    const char* sidewalk_tag = way.tags()["sidewalk"];
+                    if (sidewalk_tag) {
+                        std::string sw(sidewalk_tag);
+                        if (sw == "both" || sw == "left" || sw == "right" || sw == "yes") {
+                            sidewalks_.push_back(geom);
+                        }
+                    }
                 }
-                return;
-            }
-
-            const char* footway_tag = way.tags()["footway"];
-            if (footway_tag && std::string(footway_tag) == "sidewalk") {
-                roads_.push_back(geom);
                 return;
             }
 
@@ -145,6 +185,24 @@ namespace {
 
         // Handle areas (from multipolygons or closed ways) - called by MultipolygonManager
         void area(const osmium::Area& area) {
+            // Check for parking areas (amenity=parking as multipolygon)
+            const char* amenity_tag = area.tags()["amenity"];
+            if (amenity_tag && std::string(amenity_tag) == "parking") {
+                for (const auto& outer_ring : area.outer_rings()) {
+                    semantic_bki::Geometry2D geom;
+                    for (const auto& node_ref : outer_ring) {
+                        const osmium::Location& location = node_ref.location();
+                        if (location.valid()) {
+                            float x = static_cast<float>((location.lon() - origin_lon_) * kMetersPerDegLon_);
+                            float y = static_cast<float>((location.lat() - origin_lat_) * kMetersPerDegLat_);
+                            geom.coords.push_back({x, y});
+                        }
+                    }
+                    if (geom.coords.size() >= 3) parking_.push_back(geom);
+                }
+                return;
+            }
+
             // Check tags to determine type
             const char* building_tag = area.tags()["building"];
             if (building_tag) {
@@ -244,6 +302,10 @@ namespace {
         double kMetersPerDegLat_, kMetersPerDegLon_;
         std::vector<semantic_bki::Geometry2D>& buildings_;
         std::vector<semantic_bki::Geometry2D>& roads_;
+        std::vector<semantic_bki::Geometry2D>& sidewalks_;
+        std::vector<semantic_bki::Geometry2D>& parking_;
+        std::vector<semantic_bki::Geometry2D>& fences_;
+        std::vector<semantic_bki::Geometry2D>& stairs_;
         std::vector<semantic_bki::Geometry2D>& grasslands_;
         std::vector<semantic_bki::Geometry2D>& trees_;
         std::vector<std::pair<float, float>>& tree_points_;
@@ -283,6 +345,10 @@ namespace semantic_bki {
     bool OSMVisualizer::loadFromOSM(const std::string& osm_file, double origin_lat, double origin_lon) {
         buildings_.clear();
         roads_.clear();
+        sidewalks_.clear();
+        parking_.clear();
+        fences_.clear();
+        stairs_.clear();
         grasslands_.clear();
         trees_.clear();
         tree_points_.clear();
@@ -301,7 +367,7 @@ namespace semantic_bki {
                 location_handler(index);
             
             // Create handler to extract buildings, roads, sidewalks, grasslands, trees (ways + point trees + multipolygons)
-            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_, grasslands_, trees_, tree_points_);
+            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_, sidewalks_, parking_, fences_, stairs_, grasslands_, trees_, tree_points_);
             
             // MultipolygonManager to convert multipolygon relations to areas
             // Configure assembler and filter for multipolygons (buildings, landuse, natural)
@@ -317,6 +383,7 @@ namespace semantic_bki {
             filter.add_rule(true, "natural", "scrub");
             filter.add_rule(true, "natural", "wood");
             filter.add_rule(true, "natural", "forest");
+            filter.add_rule(true, "amenity", "parking");
             using MultipolygonManager = osmium::area::MultipolygonManager<osmium::area::Assembler>;
             MultipolygonManager mp_manager(assembler_config, filter);
             
@@ -346,7 +413,7 @@ namespace semantic_bki {
             
             // RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings, " << roads_.size() << " roads/sidewalks, " << grasslands_.size() << " grasslands, " << trees_.size() << " tree/forest polygons, " << tree_points_.size() << " tree points from OSM file using libosmium");
             
-            if (buildings_.empty() && roads_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
+            if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
                 // RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings, roads, grasslands, or trees found in OSM file.");
             }
             
@@ -470,6 +537,192 @@ namespace semantic_bki {
         return marker;
     }
 
+    visualization_msgs::msg::Marker OSMVisualizer::createSidewalkMarker(const std::vector<Geometry2D>& sidewalks) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_sidewalks";
+        marker.id = 6;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.25;
+        marker.color.r = 0.0f;
+        marker.color.g = 1.0f;
+        marker.color.b = 1.0f;
+        marker.color.a = 1.0f;  // Cyan
+
+        for (const auto& sidewalk : sidewalks) {
+            if (sidewalk.coords.size() < 2) continue;
+            bool has_invalid = false;
+            for (const auto& coord : sidewalk.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) ||
+                    std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+            for (size_t i = 0; i < sidewalk.coords.size() - 1; ++i) {
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = sidewalk.coords[i].first;
+                p1.y = sidewalk.coords[i].second;
+                p1.z = 0.0;
+                p2.x = sidewalk.coords[i + 1].first;
+                p2.y = sidewalk.coords[i + 1].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        }
+        return marker;
+    }
+
+    visualization_msgs::msg::Marker OSMVisualizer::createParkingMarker(const std::vector<Geometry2D>& parking) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_parking";
+        marker.id = 7;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.3;
+        marker.color.r = 1.0f;
+        marker.color.g = 0.65f;
+        marker.color.b = 0.0f;
+        marker.color.a = 1.0f;  // Orange
+
+        for (const auto& park : parking) {
+            if (park.coords.size() < 2) continue;
+            bool has_invalid = false;
+            for (const auto& coord : park.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) ||
+                    std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+            // Draw closed polygon outline (like buildings) or polyline
+            for (size_t i = 0; i < park.coords.size(); ++i) {
+                size_t next_idx = (i + 1) % park.coords.size();
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = park.coords[i].first;
+                p1.y = park.coords[i].second;
+                p1.z = 0.0;
+                p2.x = park.coords[next_idx].first;
+                p2.y = park.coords[next_idx].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        }
+        return marker;
+    }
+
+    visualization_msgs::msg::Marker OSMVisualizer::createFenceMarker(const std::vector<Geometry2D>& fences) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_fences";
+        marker.id = 8;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.2;
+        marker.color.r = 0.5f;
+        marker.color.g = 0.45f;
+        marker.color.b = 0.4f;
+        marker.color.a = 1.0f;  // Gray/brown
+
+        for (const auto& fence : fences) {
+            if (fence.coords.size() < 2) continue;
+            bool has_invalid = false;
+            for (const auto& coord : fence.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) ||
+                    std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+            for (size_t i = 0; i < fence.coords.size() - 1; ++i) {
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = fence.coords[i].first;
+                p1.y = fence.coords[i].second;
+                p1.z = 0.0;
+                p2.x = fence.coords[i + 1].first;
+                p2.y = fence.coords[i + 1].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        }
+        return marker;
+    }
+
+    visualization_msgs::msg::Marker OSMVisualizer::createStairsMarker(const std::vector<Geometry2D>& stairs) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_stairs";
+        marker.id = 9;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.25;
+        marker.color.r = 0.6f;
+        marker.color.g = 0.4f;
+        marker.color.b = 0.2f;
+        marker.color.a = 1.0f;  // Brown/tan for stairs
+
+        const float hw = stairs_width_meters_ * 0.5f;
+        const float eps = 1e-6f;
+
+        for (const auto& stair : stairs) {
+            if (stair.coords.size() < 2) continue;
+            bool has_invalid = false;
+            for (const auto& coord : stair.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) ||
+                    std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+
+            for (size_t i = 0; i < stair.coords.size() - 1; ++i) {
+                float x1 = stair.coords[i].first;
+                float y1 = stair.coords[i].second;
+                float x2 = stair.coords[i + 1].first;
+                float y2 = stair.coords[i + 1].second;
+                float dx = x2 - x1;
+                float dy = y2 - y1;
+                float L = std::sqrt(dx * dx + dy * dy);
+                if (L < eps) continue;
+                float nx = -dy / L;
+                float ny = dx / L;
+                float c1x = x1 + hw * nx, c1y = y1 + hw * ny;
+                float c2x = x1 - hw * nx, c2y = y1 - hw * ny;
+                float c3x = x2 - hw * nx, c3y = y2 - hw * ny;
+                float c4x = x2 + hw * nx, c4y = y2 + hw * ny;
+                auto addLine = [&marker](float ax, float ay, float bx, float by) {
+                    geometry_msgs::msg::Point p1, p2;
+                    p1.x = ax; p1.y = ay; p1.z = 0.0;
+                    p2.x = bx; p2.y = by; p2.z = 0.0;
+                    marker.points.push_back(p1);
+                    marker.points.push_back(p2);
+                };
+                addLine(c1x, c1y, c2x, c2y);
+                addLine(c2x, c2y, c3x, c3y);
+                addLine(c3x, c3y, c4x, c4y);
+                addLine(c4x, c4y, c1x, c1y);
+            }
+        }
+        return marker;
+    }
+
     visualization_msgs::msg::Marker OSMVisualizer::createPathMarker() const {
         visualization_msgs::msg::Marker marker;
         marker.header.frame_id = frame_id_;
@@ -587,23 +840,31 @@ namespace semantic_bki {
         marker.header.stamp = node_->now();
         marker.ns = "osm_tree_points";
         marker.id = 5;
-        marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = 10.0;  // sphere diameter in meters (10x for visibility)
-        marker.scale.y = 10.0;
-        marker.scale.z = 10.0;
+        marker.scale.x = 0.25;
         marker.color.r = 0.1f;
         marker.color.g = 0.5f;
         marker.color.b = 0.2f;
         marker.color.a = 0.9f;
+        const int circle_segments = 24;
+        const float r = tree_point_radius_meters_;
         for (const auto& pt : tree_points_) {
             if (std::isnan(pt.first) || std::isnan(pt.second) || std::isinf(pt.first) || std::isinf(pt.second)) continue;
-            geometry_msgs::msg::Point p;
-            p.x = pt.first;
-            p.y = pt.second;
-            p.z = 0.0;
-            marker.points.push_back(p);
+            for (int i = 0; i < circle_segments; ++i) {
+                float a1 = 2.0f * static_cast<float>(M_PI) * i / circle_segments;
+                float a2 = 2.0f * static_cast<float>(M_PI) * (i + 1) / circle_segments;
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = pt.first + r * std::cos(a1);
+                p1.y = pt.second + r * std::sin(a1);
+                p1.z = 0.0;
+                p2.x = pt.first + r * std::cos(a2);
+                p2.y = pt.second + r * std::sin(a2);
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
         }
         return marker;
     }
@@ -635,9 +896,29 @@ namespace semantic_bki {
         if (!roads_.empty()) {
             auto marker = createRoadMarker(roads_);
             marker_array.markers.push_back(marker);
-            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << roads_.size() << " roads/sidewalks with " << marker.points.size() << " line points");
+            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << roads_.size() << " roads with " << marker.points.size() << " line points");
         } else {
             // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No roads loaded! roads_.size()=" << roads_.size());
+        }
+
+        if (!sidewalks_.empty()) {
+            auto marker = createSidewalkMarker(sidewalks_);
+            marker_array.markers.push_back(marker);
+        }
+
+        if (!parking_.empty()) {
+            auto marker = createParkingMarker(parking_);
+            marker_array.markers.push_back(marker);
+        }
+
+        if (!fences_.empty()) {
+            auto marker = createFenceMarker(fences_);
+            marker_array.markers.push_back(marker);
+        }
+
+        if (!stairs_.empty()) {
+            auto marker = createStairsMarker(stairs_);
+            marker_array.markers.push_back(marker);
         }
         
         if (!grasslands_.empty()) {
@@ -657,14 +938,8 @@ namespace semantic_bki {
             // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << tree_points_.size() << " tree points (single-node trees)");
         }
         
-        if (!path_.empty()) {
-            auto marker = createPathMarker();
-            marker_array.markers.push_back(marker);
-            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added lidar path with " << path_.size() << " points");
-        }
-        
         if (marker_array.markers.empty()) {
-            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ", path=" << path_.size() << ")");
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", sidewalks=" << sidewalks_.size() << ", parking=" << parking_.size() << ", fences=" << fences_.size() << ", stairs=" << stairs_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
             return;
         }
         
@@ -747,7 +1022,7 @@ namespace semantic_bki {
 
     void OSMVisualizer::timerCallback() {
         try {
-            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: Timer callback triggered, republishing markers (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", sidewalks=" << sidewalks_.size() << ", parking=" << parking_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
             if (!node_) {
                 RCLCPP_ERROR(node_->get_logger(), "OSMVisualizer: Timer callback - node_ is null!");
                 return;
@@ -808,6 +1083,28 @@ namespace semantic_bki {
                 transformPoint(coord.first, coord.second);
             }
         }
+
+        // Transform sidewalks and parking
+        for (auto& sidewalk : sidewalks_) {
+            for (auto& coord : sidewalk.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
+        for (auto& park : parking_) {
+            for (auto& coord : park.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
+        for (auto& fence : fences_) {
+            for (auto& coord : fence.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
+        for (auto& stair : stairs_) {
+            for (auto& coord : stair.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
         
         // Transform grasslands and trees
         for (auto& grassland : grasslands_) {
@@ -846,6 +1143,38 @@ namespace semantic_bki {
                     max_y_after = std::max(max_y_after, coord.second);
                 }
             }
+            for (const auto& sw : sidewalks_) {
+                for (const auto& coord : sw.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
+            for (const auto& p : parking_) {
+                for (const auto& coord : p.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
+            for (const auto& f : fences_) {
+                for (const auto& coord : f.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
+            for (const auto& st : stairs_) {
+                for (const auto& coord : st.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
             for (const auto& g : grasslands_) {
                 for (const auto& coord : g.coords) {
                     min_x_after = std::min(min_x_after, coord.first);
@@ -871,7 +1200,7 @@ namespace semantic_bki {
     }
 
     bool OSMVisualizer::saveAsPNG(const std::string& output_path, int image_width, int image_height, int margin_pixels) {
-        if (buildings_.empty() && roads_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty() && path_.empty()) {
+        if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
             // RCLCPP_WARN(node_->get_logger(), "No buildings, roads, grasslands, trees, tree points, or path to render in PNG");
             return false;
         }
@@ -899,6 +1228,39 @@ namespace semantic_bki {
                 max_y = std::max(max_y, coord.second);
             }
         }
+        for (const auto& sw : sidewalks_) {
+            for (const auto& coord : sw.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
+            }
+        }
+        for (const auto& p : parking_) {
+            for (const auto& coord : p.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
+            }
+        }
+        for (const auto& f : fences_) {
+            for (const auto& coord : f.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
+            }
+        }
+        const float sw = stairs_width_meters_ * 0.5f;
+        for (const auto& st : stairs_) {
+            for (const auto& coord : st.coords) {
+                min_x = std::min(min_x, coord.first - sw);
+                max_x = std::max(max_x, coord.first + sw);
+                min_y = std::min(min_y, coord.second - sw);
+                max_y = std::max(max_y, coord.second + sw);
+            }
+        }
         for (const auto& g : grasslands_) {
             for (const auto& coord : g.coords) {
                 min_x = std::min(min_x, coord.first);
@@ -915,19 +1277,13 @@ namespace semantic_bki {
                 max_y = std::max(max_y, coord.second);
             }
         }
+        const float tr = tree_point_radius_meters_;
         for (const auto& pt : tree_points_) {
-            min_x = std::min(min_x, pt.first);
-            max_x = std::max(max_x, pt.first);
-            min_y = std::min(min_y, pt.second);
-            max_y = std::max(max_y, pt.second);
+            min_x = std::min(min_x, pt.first - tr);
+            max_x = std::max(max_x, pt.first + tr);
+            min_y = std::min(min_y, pt.second - tr);
+            max_y = std::max(max_y, pt.second + tr);
         }
-        for (const auto& pt : path_) {
-            min_x = std::min(min_x, pt.first);
-            max_x = std::max(max_x, pt.first);
-            min_y = std::min(min_y, pt.second);
-            max_y = std::max(max_y, pt.second);
-        }
-
         if (min_x >= max_x || min_y >= max_y) {
             RCLCPP_ERROR(node_->get_logger(), "Invalid bounding box for OSM geometries");
             return false;
@@ -946,20 +1302,6 @@ namespace semantic_bki {
 
         // Create white background image
         cv::Mat image = cv::Mat::ones(image_height, image_width, CV_8UC3) * 255;
-
-        // Draw lidar path (green) first
-        if (path_.size() >= 2) {
-            cv::Scalar path_color(0, 255, 0); // Green (BGR)
-            for (size_t i = 0; i < path_.size() - 1; ++i) {
-                int px1 = static_cast<int>(path_[i].first * scale + offset_x);
-                int py1 = static_cast<int>(path_[i].second * scale + offset_y);
-                py1 = image_height - py1;
-                int px2 = static_cast<int>(path_[i + 1].first * scale + offset_x);
-                int py2 = static_cast<int>(path_[i + 1].second * scale + offset_y);
-                py2 = image_height - py2;
-                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), path_color, 2);
-            }
-        }
 
         // Draw grasslands (light green outlines)
         cv::Scalar grassland_color(90, 217, 90); // BGR light green
@@ -995,31 +1337,103 @@ namespace semantic_bki {
             }
         }
         // Draw single-point trees (natural=tree nodes) as small circles
-        const int tree_point_radius = std::max(2, static_cast<int>(30.0 * scale));  // ~30m in world (10x), at least 2px
+        const int tree_circle_radius_px = std::max(2, static_cast<int>(tree_point_radius_meters_ * scale));
         for (const auto& pt : tree_points_) {
             if (std::isnan(pt.first) || std::isnan(pt.second)) continue;
-            int px = static_cast<int>(pt.first * scale + offset_x);
-            int py = static_cast<int>(pt.second * scale + offset_y);
-            py = image_height - py;
-            cv::circle(image, cv::Point(px, py), tree_point_radius, tree_color, -1);
+            int cx = static_cast<int>(pt.first * scale + offset_x);
+            int cy = static_cast<int>(pt.second * scale + offset_y);
+            cy = image_height - cy;
+            cv::circle(image, cv::Point(cx, cy), tree_circle_radius_px, tree_color, 2);  // 2D circle outline
         }
 
         // Draw roads (red)
         cv::Scalar road_color(0, 0, 255); // Red color (BGR format)
         for (const auto& road : roads_) {
             if (road.coords.size() < 2) continue;
-            
-            // Convert road coordinates to image coordinates and draw polyline
             for (size_t i = 0; i < road.coords.size() - 1; ++i) {
                 int px1 = static_cast<int>(road.coords[i].first * scale + offset_x);
                 int py1 = static_cast<int>(road.coords[i].second * scale + offset_y);
-                py1 = image_height - py1; // Flip Y axis
-                
+                py1 = image_height - py1;
                 int px2 = static_cast<int>(road.coords[i + 1].first * scale + offset_x);
                 int py2 = static_cast<int>(road.coords[i + 1].second * scale + offset_y);
-                py2 = image_height - py2; // Flip Y axis
-                
+                py2 = image_height - py2;
                 cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), road_color, 2);
+            }
+        }
+
+        // Draw sidewalks (cyan)
+        cv::Scalar sidewalk_color(255, 255, 0); // Cyan (BGR)
+        for (const auto& sidewalk : sidewalks_) {
+            if (sidewalk.coords.size() < 2) continue;
+            for (size_t i = 0; i < sidewalk.coords.size(); ++i) {
+                size_t next_i = (i + 1) % sidewalk.coords.size();
+                int px1 = static_cast<int>(sidewalk.coords[i].first * scale + offset_x);
+                int py1 = static_cast<int>(sidewalk.coords[i].second * scale + offset_y);
+                py1 = image_height - py1;
+                int px2 = static_cast<int>(sidewalk.coords[next_i].first * scale + offset_x);
+                int py2 = static_cast<int>(sidewalk.coords[next_i].second * scale + offset_y);
+                py2 = image_height - py2;
+                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), sidewalk_color, 1);
+            }
+        }
+
+        // Draw parking (orange)
+        cv::Scalar parking_color(0, 165, 255); // Orange (BGR)
+        for (const auto& park : parking_) {
+            if (park.coords.size() < 2) continue;
+            for (size_t i = 0; i < park.coords.size(); ++i) {
+                size_t next_i = (i + 1) % park.coords.size();
+                int px1 = static_cast<int>(park.coords[i].first * scale + offset_x);
+                int py1 = static_cast<int>(park.coords[i].second * scale + offset_y);
+                py1 = image_height - py1;
+                int px2 = static_cast<int>(park.coords[next_i].first * scale + offset_x);
+                int py2 = static_cast<int>(park.coords[next_i].second * scale + offset_y);
+                py2 = image_height - py2;
+                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), parking_color, 2);
+            }
+        }
+
+        // Draw fences (barrier=fence)
+        cv::Scalar fence_color(102, 115, 128);  // Gray/brown (BGR)
+        for (const auto& fence : fences_) {
+            if (fence.coords.size() < 2) continue;
+            for (size_t i = 0; i < fence.coords.size() - 1; ++i) {
+                int px1 = static_cast<int>(fence.coords[i].first * scale + offset_x);
+                int py1 = static_cast<int>(fence.coords[i].second * scale + offset_y);
+                py1 = image_height - py1;
+                int px2 = static_cast<int>(fence.coords[i + 1].first * scale + offset_x);
+                int py2 = static_cast<int>(fence.coords[i + 1].second * scale + offset_y);
+                py2 = image_height - py2;
+                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), fence_color, 1);
+            }
+        }
+
+        // Draw stairs (highway=steps) as rectangles enclosing each segment
+        cv::Scalar stairs_color(51, 102, 153);  // Brown/tan (BGR)
+        const float hw_stairs = stairs_width_meters_ * 0.5f;
+        const float eps_stairs = 1e-6f;
+        for (const auto& stair : stairs_) {
+            if (stair.coords.size() < 2) continue;
+            for (size_t i = 0; i < stair.coords.size() - 1; ++i) {
+                float x1 = stair.coords[i].first, y1 = stair.coords[i].second;
+                float x2 = stair.coords[i + 1].first, y2 = stair.coords[i + 1].second;
+                float dx = x2 - x1, dy = y2 - y1;
+                float L = std::sqrt(dx * dx + dy * dy);
+                if (L < eps_stairs) continue;
+                float nx = -dy / L, ny = dx / L;
+                float c1x = x1 + hw_stairs * nx, c1y = y1 + hw_stairs * ny;
+                float c2x = x1 - hw_stairs * nx, c2y = y1 - hw_stairs * ny;
+                float c3x = x2 - hw_stairs * nx, c3y = y2 - hw_stairs * ny;
+                float c4x = x2 + hw_stairs * nx, c4y = y2 + hw_stairs * ny;
+                auto toPt = [&](float x, float y) {
+                    int px = static_cast<int>(x * scale + offset_x);
+                    int py = image_height - static_cast<int>(y * scale + offset_y);
+                    return cv::Point(px, py);
+                };
+                std::vector<cv::Point> rect = { toPt(c1x, c1y), toPt(c2x, c2y), toPt(c3x, c3y), toPt(c4x, c4y) };
+                for (size_t j = 0; j < 4; ++j) {
+                    cv::line(image, rect[j], rect[(j + 1) % 4], stairs_color, 2);
+                }
             }
         }
 
@@ -1056,7 +1470,7 @@ namespace semantic_bki {
 
         // Add coordinate info as text
         std::stringstream info;
-        info << "B:" << buildings_.size() << " R:" << roads_.size() << " G:" << grasslands_.size() << " T:" << trees_.size() << " TP:" << tree_points_.size() << " P:" << path_.size() << " | ";
+        info << "B:" << buildings_.size() << " R:" << roads_.size() << " SW:" << sidewalks_.size() << " PK:" << parking_.size() << " F:" << fences_.size() << " ST:" << stairs_.size() << " G:" << grasslands_.size() << " T:" << trees_.size() << " TP:" << tree_points_.size() << " | ";
         info << "Bounds: [" << min_x << ", " << min_y << "] to [" << max_x << ", " << max_y << "]";
         cv::putText(image, info.str(), cv::Point(10, 30), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 0), 2);

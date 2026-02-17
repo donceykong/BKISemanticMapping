@@ -211,6 +211,8 @@ namespace semantic_bki {
                 node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
                 node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
                 node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
+                node.set_osm_parking(compute_osm_parking_prior(loc.x(), loc.y()));
+                node.set_osm_fence(compute_osm_fence_prior(loc.x(), loc.y()));
             }
 
         }
@@ -244,6 +246,18 @@ namespace semantic_bki {
 
     void SemanticBKIOctoMap::set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points) {
         osm_tree_points_ = tree_points;
+    }
+
+    void SemanticBKIOctoMap::set_osm_tree_point_radius(float radius_m) {
+        osm_tree_point_radius_ = std::max(0.1f, radius_m);
+    }
+
+    void SemanticBKIOctoMap::set_osm_parking(const std::vector<Geometry2D> &parking) {
+        osm_parking_ = parking;
+    }
+
+    void SemanticBKIOctoMap::set_osm_fences(const std::vector<Geometry2D> &fences) {
+        osm_fences_ = fences;
     }
 
     void SemanticBKIOctoMap::set_osm_decay_meters(float decay_m) {
@@ -300,13 +314,52 @@ namespace semantic_bki {
                 if (poly_prior > max_prior) max_prior = poly_prior;
             }
         }
-        // Check tree points (single trees)
+        // Check tree points (single trees): treat as circles with radius; prior = 1 inside, decay outside (same as polygons)
         if (!osm_tree_points_.empty()) {
-            float d = distance_to_points(x, y, osm_tree_points_);
-            float point_prior = osm_prior_from_distance(d, osm_decay_meters_);
-            if (point_prior > max_prior) max_prior = point_prior;
+            float min_signed_d = std::numeric_limits<float>::max();
+            for (const auto& pt : osm_tree_points_) {
+                float signed_d = distance_to_circle_signed(x, y, pt.first, pt.second, osm_tree_point_radius_);
+                if (signed_d <= 0.f) {
+                    max_prior = 1.f;  // inside a tree circle
+                    break;
+                }
+                if (signed_d < min_signed_d) min_signed_d = signed_d;
+            }
+            if (max_prior < 1.f && min_signed_d < std::numeric_limits<float>::max()) {
+                float circle_prior = osm_prior_from_signed_distance(min_signed_d, osm_decay_meters_);
+                if (circle_prior > max_prior) max_prior = circle_prior;
+            }
         }
         return max_prior;
+    }
+
+    float SemanticBKIOctoMap::compute_osm_parking_prior(float x, float y) const {
+        if (osm_parking_.empty()) return 0.f;
+        float max_prior = 0.f;
+        float min_positive_d = std::numeric_limits<float>::max();
+        for (const auto &poly : osm_parking_) {
+            if (poly.coords.size() < 3) {
+                float d = distance_to_polyline(x, y, poly);
+                float prior = osm_prior_from_distance(d, osm_decay_meters_);
+                if (prior > max_prior) max_prior = prior;
+                continue;
+            }
+            float signed_d = distance_to_polygon_boundary(x, y, poly);
+            if (signed_d <= 0.f) return 1.f;  // inside parking
+            if (signed_d < min_positive_d) min_positive_d = signed_d;
+        }
+        float poly_prior = osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+        return std::max(max_prior, poly_prior);
+    }
+
+    float SemanticBKIOctoMap::compute_osm_fence_prior(float x, float y) const {
+        if (osm_fences_.empty()) return 0.f;
+        float min_d = std::numeric_limits<float>::max();
+        for (const auto &fence : osm_fences_) {
+            float d = distance_to_polyline(x, y, fence);
+            if (d < min_d) min_d = d;
+        }
+        return osm_prior_from_distance(min_d, osm_decay_meters_);
     }
 
     void SemanticBKIOctoMap::insert_pointcloud(const PCLPointCloud &cloud, const point3f &origin, float ds_resolution,
@@ -434,6 +487,8 @@ namespace semantic_bki {
                     node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
                     node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
                     node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
+                    node.set_osm_parking(compute_osm_parking_prior(loc.x(), loc.y()));
+                    node.set_osm_fence(compute_osm_fence_prior(loc.x(), loc.y()));
                 }
             }
         }
