@@ -60,6 +60,23 @@ namespace semantic_bki {
         void setPath(const std::vector<std::pair<float, float>>& path);
 
         /**
+         * Set radius (meters) for tree points (natural=tree nodes). Drawn as 2D circles. Same value used for prior projection.
+         * @param radius_meters Radius in meters (default 5.0)
+         */
+        void setTreePointRadius(float radius_meters) { tree_point_radius_meters_ = std::max(0.1f, radius_meters); }
+
+        float getTreePointRadius() const { return tree_point_radius_meters_; }
+
+        /**
+         * Set width (meters) for stairs (highway=steps). Each polyline segment is drawn as a rectangle
+         * with this width perpendicular to the segment.
+         * @param width_meters Width in meters (default 1.5)
+         */
+        void setStairsWidth(float width_meters) { stairs_width_meters_ = std::max(0.1f, width_meters); }
+
+        float getStairsWidth() const { return stairs_width_meters_; }
+
+        /**
          * Save OSM buildings and roads visualization as a PNG image.
          * @param output_path Path to save the PNG file
          * @param image_width Width of the output image in pixels (default: 2048)
@@ -72,6 +89,10 @@ namespace semantic_bki {
         /// Return OSM geometries (after transform if applied). Used to set voxel OSM priors.
         const std::vector<Geometry2D>& getBuildings() const { return buildings_; }
         const std::vector<Geometry2D>& getRoads() const { return roads_; }
+        const std::vector<Geometry2D>& getSidewalks() const { return sidewalks_; }
+        const std::vector<Geometry2D>& getParking() const { return parking_; }
+        const std::vector<Geometry2D>& getFences() const { return fences_; }
+        const std::vector<Geometry2D>& getStairs() const { return stairs_; }
         const std::vector<Geometry2D>& getGrasslands() const { return grasslands_; }
         const std::vector<Geometry2D>& getTrees() const { return trees_; }
         const std::vector<std::pair<float, float>>& getTreePoints() const { return tree_points_; }
@@ -88,9 +109,29 @@ namespace semantic_bki {
         visualization_msgs::msg::Marker createBuildingMarker(const std::vector<Geometry2D>& buildings);
 
         /**
-         * Create Marker message for roads and sidewalks (red polylines).
+         * Create Marker message for roads (red polylines).
          */
         visualization_msgs::msg::Marker createRoadMarker(const std::vector<Geometry2D>& roads);
+
+        /**
+         * Create Marker message for sidewalks (cyan polylines).
+         */
+        visualization_msgs::msg::Marker createSidewalkMarker(const std::vector<Geometry2D>& sidewalks);
+
+        /**
+         * Create Marker message for parking (yellow/orange polylines).
+         */
+        visualization_msgs::msg::Marker createParkingMarker(const std::vector<Geometry2D>& parking);
+
+        /**
+         * Create Marker message for fences (barrier=fence polylines).
+         */
+        visualization_msgs::msg::Marker createFenceMarker(const std::vector<Geometry2D>& fences);
+
+        /**
+         * Create Marker message for stairs (highway=steps). Each segment drawn as rectangle with stairs_width_meters_.
+         */
+        visualization_msgs::msg::Marker createStairsMarker(const std::vector<Geometry2D>& stairs);
 
         /**
          * Create Marker message for lidar path (green polyline).
@@ -108,7 +149,7 @@ namespace semantic_bki {
         visualization_msgs::msg::Marker createTreeMarker(const std::vector<Geometry2D>& trees);
 
         /**
-         * Create Marker message for tree points (single-node trees as spheres).
+         * Create Marker message for tree points (single-node trees as 2D circle outlines).
          */
         visualization_msgs::msg::Marker createTreePointsMarker() const;
 
@@ -120,10 +161,16 @@ namespace semantic_bki {
 
         std::vector<Geometry2D> buildings_;
         std::vector<Geometry2D> roads_;
+        std::vector<Geometry2D> sidewalks_;
+        std::vector<Geometry2D> parking_;
+        std::vector<Geometry2D> fences_;
+        std::vector<Geometry2D> stairs_;
         std::vector<Geometry2D> grasslands_;
         std::vector<Geometry2D> trees_;           // Forest/wood polygons
         std::vector<std::pair<float, float>> tree_points_;  // Single-point trees (natural=tree nodes)
         std::vector<std::pair<float, float>> path_;  // Lidar trajectory for debugging
+        float tree_point_radius_meters_{5.0f};  // Radius for tree point circles (visualization and prior)
+        float stairs_width_meters_{1.5f};       // Width of rectangle enclosing each stairs segment
 
         bool transformed_; // Flag to track if data has already been transformed
     };

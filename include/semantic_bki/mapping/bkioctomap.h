@@ -331,14 +331,19 @@ namespace semantic_bki {
         void set_osm_grasslands(const std::vector<Geometry2D> &grasslands);
         void set_osm_trees(const std::vector<Geometry2D> &trees);
         void set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points);
+        void set_osm_tree_point_radius(float radius_m);
+        void set_osm_parking(const std::vector<Geometry2D> &parking);
+        void set_osm_fences(const std::vector<Geometry2D> &fences);
         void set_osm_decay_meters(float decay_m);
 
     private:
-        /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points).
+        /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points), parking (polygon), fence (polyline).
         float compute_osm_building_prior(float x, float y) const;
         float compute_osm_road_prior(float x, float y) const;
         float compute_osm_grassland_prior(float x, float y) const;
         float compute_osm_tree_prior(float x, float y) const;
+        float compute_osm_parking_prior(float x, float y) const;
+        float compute_osm_fence_prior(float x, float y) const;
 
     private:
         /// @return true if point is inside a bounding box given min and max limits.
@@ -401,6 +406,9 @@ namespace semantic_bki {
         std::vector<Geometry2D> osm_grasslands_;
         std::vector<Geometry2D> osm_trees_;
         std::vector<std::pair<float, float>> osm_tree_points_;
+        float osm_tree_point_radius_{5.0f};  // Radius (m) for tree point circles; prior projected same as polygons
+        std::vector<Geometry2D> osm_parking_;
+        std::vector<Geometry2D> osm_fences_;
         float osm_decay_meters_;
     };
 

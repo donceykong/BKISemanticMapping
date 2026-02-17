@@ -75,6 +75,14 @@ namespace semantic_bki {
         return std::sqrt(min_d_sq);
     }
 
+    /// Signed distance from (px,py) to circle: negative = inside, positive = outside.
+    /// Returns d - radius where d = distance from (px,py) to circle center.
+    inline float distance_to_circle_signed(float px, float py, float cx, float cy, float radius) {
+        float dx = px - cx, dy = py - cy;
+        float d = std::sqrt(dx * dx + dy * dy);
+        return d - radius;
+    }
+
     /// Minimum distance from (px,py) to nearest point in point list.
     inline float distance_to_points(float px, float py, const std::vector<std::pair<float, float>>& points) {
         if (points.empty()) return std::numeric_limits<float>::max();
