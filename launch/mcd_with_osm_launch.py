@@ -37,7 +37,7 @@ def generate_launch_description():
     color_mode_arg = DeclareLaunchArgument(
         'color_mode',
         default_value='semantic',
-        description='Visualization color mode: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_blend (all priors blended)'
+        description='Visualization color mode: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_parking, osm_fence, osm_blend (all priors blended)'
     )
     
     osm_file_arg = DeclareLaunchArgument(
