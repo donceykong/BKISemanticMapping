@@ -269,11 +269,14 @@ int main(int argc, char **argv) {
         mcd_data.set_osm_tree_points(osm_vis.getTreePoints());
         mcd_data.set_osm_parking(osm_vis.getParking());
         mcd_data.set_osm_fences(osm_vis.getFences());
+        mcd_data.set_osm_stairs(osm_vis.getStairs());
+        mcd_data.set_osm_stairs_width(osm_vis.getStairsWidth());
         RCLCPP_INFO_STREAM(node->get_logger(), "Loaded OSM geometries for voxel priors: " 
             << osm_vis.getBuildings().size() << " buildings, " 
             << osm_vis.getRoads().size() << " roads, "
             << osm_vis.getParking().size() << " parking, "
             << osm_vis.getFences().size() << " fences, "
+            << osm_vis.getStairs().size() << " stairs, "
             << osm_vis.getGrasslands().size() << " grasslands, "
             << osm_vis.getTrees().size() << " tree polygons, "
             << osm_vis.getTreePoints().size() << " tree points (decay=" << osm_decay_meters << " m)");

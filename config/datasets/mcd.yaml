@@ -19,7 +19,7 @@
 
     # Dataset information
     input_data_prefix: lidar_bin/data
-    input_label_prefix: inferred_labels
+    input_label_prefix: gt_labels
     lidar_pose_file: pose_inW.csv
     gt_label_prefix: gt_labels
     evaluation_result_prefix: evaluations/
@@ -28,9 +28,9 @@
 
     # Visualization: show OSM priors colored (blend of building/road/grassland/tree). Use semantic for class colors.
     # Options: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_parking, osm_fence, osm_blend (all priors blended)
-    color_mode: osm_blend
+    color_mode: semantic
     # Color configuration (matters if color_mode is set to 'semantic)
-    colors_file: semantickitti_colors.yaml  # Color mapping file (relative to config/datasets/)
+    colors_file: mcd_colors.yaml  # Color mapping file (relative to config/datasets/)
 
     # --------------------------------
     # OSM prior configuration 
@@ -38,7 +38,7 @@
     # OSM prior decay: distance (m) over which prior drops from 1 to 0 away from OSM geometry
     osm_decay_meters: 3.0
     # OSM file for voxel priors (path relative to data dir, or absolute). Must match osm_visualizer if using both.
-    osm_file: kth.osm
+    osm_file: kth_large.osm
     osm_origin_lat: 59.348268650
     osm_origin_lon: 18.073204280
     # Tree points (natural=tree nodes): prior projected as 2D circles with this radius (meters). Same as osm_visualizer tree_point_radius_meters.

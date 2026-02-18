@@ -246,6 +246,12 @@ class MCDData {
     void set_osm_fences(const std::vector<semantic_bki::Geometry2D> &fences) {
       if (map_) map_->set_osm_fences(fences);
     }
+    void set_osm_stairs(const std::vector<semantic_bki::Geometry2D> &stairs) {
+      if (map_) map_->set_osm_stairs(stairs);
+    }
+    void set_osm_stairs_width(float width_m) {
+      if (map_) map_->set_osm_stairs_width(width_m);
+    }
     void set_osm_decay_meters(float decay_m) {
       if (map_) map_->set_osm_decay_meters(decay_m);
     }
@@ -483,7 +489,7 @@ class MCDData {
                 m_pub_->insert_point3d_semantics(p.x(), p.y(), p.z(), size, node.get_semantics(), 2);
               } else if (mode == semantic_bki::MapColorMode::OSMBlend) {
                 m_pub_->insert_point3d_osm_blend(p.x(), p.y(), p.z(), size,
-                    node.get_osm_building(), node.get_osm_road(), node.get_osm_grassland(), node.get_osm_tree(), node.get_osm_parking(), node.get_osm_fence());
+                    node.get_osm_building(), node.get_osm_road(), node.get_osm_grassland(), node.get_osm_tree(), node.get_osm_parking(), node.get_osm_fence(), node.get_osm_stairs());
               } else {
                 int prior_type = 0;
                 float value = 0.f;
@@ -494,6 +500,7 @@ class MCDData {
                   case semantic_bki::MapColorMode::OSMTree:     prior_type = 3; value = node.get_osm_tree(); break;
                   case semantic_bki::MapColorMode::OSMParking:  prior_type = 4; value = node.get_osm_parking(); break;
                   case semantic_bki::MapColorMode::OSMFence:    prior_type = 5; value = node.get_osm_fence(); break;
+                  case semantic_bki::MapColorMode::OSStairs:    prior_type = 6; value = node.get_osm_stairs(); break;
                   default: prior_type = 0; value = node.get_osm_building(); break;
                 }
                 m_pub_->insert_point3d_osm_prior(p.x(), p.y(), p.z(), size, value, prior_type);

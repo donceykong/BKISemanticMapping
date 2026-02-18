@@ -213,6 +213,7 @@ namespace semantic_bki {
                 node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
                 node.set_osm_parking(compute_osm_parking_prior(loc.x(), loc.y()));
                 node.set_osm_fence(compute_osm_fence_prior(loc.x(), loc.y()));
+                node.set_osm_stairs(compute_osm_stairs_prior(loc.x(), loc.y()));
             }
 
         }
@@ -258,6 +259,14 @@ namespace semantic_bki {
 
     void SemanticBKIOctoMap::set_osm_fences(const std::vector<Geometry2D> &fences) {
         osm_fences_ = fences;
+    }
+
+    void SemanticBKIOctoMap::set_osm_stairs(const std::vector<Geometry2D> &stairs) {
+        osm_stairs_ = stairs;
+    }
+
+    void SemanticBKIOctoMap::set_osm_stairs_width(float width_m) {
+        osm_stairs_width_ = std::max(0.1f, width_m);
     }
 
     void SemanticBKIOctoMap::set_osm_decay_meters(float decay_m) {
@@ -360,6 +369,63 @@ namespace semantic_bki {
             if (d < min_d) min_d = d;
         }
         return osm_prior_from_distance(min_d, osm_decay_meters_);
+    }
+
+    float SemanticBKIOctoMap::compute_osm_stairs_prior(float x, float y) const {
+        if (osm_stairs_.empty()) return 0.f;
+        float max_prior = 0.f;
+        float min_positive_d = std::numeric_limits<float>::max();
+        const float hw = osm_stairs_width_ * 0.5f;
+        const float eps = 1e-6f;
+        
+        // Convert each stair polyline segment into a rectangle polygon and check if point is inside
+        for (const auto &stair : osm_stairs_) {
+            if (stair.coords.size() < 2) continue;
+            
+            // For each segment in the polyline, create a rectangle
+            for (size_t i = 0; i < stair.coords.size() - 1; ++i) {
+                float x1 = stair.coords[i].first;
+                float y1 = stair.coords[i].second;
+                float x2 = stair.coords[i + 1].first;
+                float y2 = stair.coords[i + 1].second;
+                float dx = x2 - x1;
+                float dy = y2 - y1;
+                float L = std::sqrt(dx * dx + dy * dy);
+                if (L < eps) continue;
+                
+                // Compute rectangle corners (perpendicular to segment)
+                float nx = -dy / L;
+                float ny = dx / L;
+                float c1x = x1 + hw * nx, c1y = y1 + hw * ny;
+                float c2x = x1 - hw * nx, c2y = y1 - hw * ny;
+                float c3x = x2 - hw * nx, c3y = y2 - hw * ny;
+                float c4x = x2 + hw * nx, c4y = y2 + hw * ny;
+                
+                // Create rectangle polygon (closed: 4 corners + first corner again)
+                Geometry2D rect;
+                rect.coords.push_back({c1x, c1y});
+                rect.coords.push_back({c2x, c2y});
+                rect.coords.push_back({c3x, c3y});
+                rect.coords.push_back({c4x, c4y});
+                rect.coords.push_back({c1x, c1y});  // Close the polygon
+                
+                // Check if point is inside this rectangle
+                float signed_d = distance_to_polygon_boundary(x, y, rect);
+                if (signed_d <= 0.f) {
+                    max_prior = 1.f;  // Inside rectangle, max prior
+                    break;
+                }
+                if (signed_d < min_positive_d) min_positive_d = signed_d;
+            }
+            if (max_prior >= 1.f) break;  // Already found inside, no need to check more
+        }
+        
+        if (max_prior >= 1.f) return 1.f;
+        if (min_positive_d < std::numeric_limits<float>::max()) {
+            float poly_prior = osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+            if (poly_prior > max_prior) max_prior = poly_prior;
+        }
+        return max_prior;
     }
 
     void SemanticBKIOctoMap::insert_pointcloud(const PCLPointCloud &cloud, const point3f &origin, float ds_resolution,
@@ -489,6 +555,7 @@ namespace semantic_bki {
                     node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
                     node.set_osm_parking(compute_osm_parking_prior(loc.x(), loc.y()));
                     node.set_osm_fence(compute_osm_fence_prior(loc.x(), loc.y()));
+                    node.set_osm_stairs(compute_osm_stairs_prior(loc.x(), loc.y()));
                 }
             }
         }

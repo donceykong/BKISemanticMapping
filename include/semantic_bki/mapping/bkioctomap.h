@@ -334,16 +334,19 @@ namespace semantic_bki {
         void set_osm_tree_point_radius(float radius_m);
         void set_osm_parking(const std::vector<Geometry2D> &parking);
         void set_osm_fences(const std::vector<Geometry2D> &fences);
+        void set_osm_stairs(const std::vector<Geometry2D> &stairs);
+        void set_osm_stairs_width(float width_m);
         void set_osm_decay_meters(float decay_m);
 
     private:
-        /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points), parking (polygon), fence (polyline).
+        /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points), parking (polygon), fence (polyline), stairs (polyline with width).
         float compute_osm_building_prior(float x, float y) const;
         float compute_osm_road_prior(float x, float y) const;
         float compute_osm_grassland_prior(float x, float y) const;
         float compute_osm_tree_prior(float x, float y) const;
         float compute_osm_parking_prior(float x, float y) const;
         float compute_osm_fence_prior(float x, float y) const;
+        float compute_osm_stairs_prior(float x, float y) const;
 
     private:
         /// @return true if point is inside a bounding box given min and max limits.
@@ -409,6 +412,8 @@ namespace semantic_bki {
         float osm_tree_point_radius_{5.0f};  // Radius (m) for tree point circles; prior projected same as polygons
         std::vector<Geometry2D> osm_parking_;
         std::vector<Geometry2D> osm_fences_;
+        std::vector<Geometry2D> osm_stairs_;
+        float osm_stairs_width_{1.5f};  // Width (m) for stairs polylines; prior = 1 inside width band, decays outside
         float osm_decay_meters_;
     };
 
