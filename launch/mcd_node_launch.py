@@ -80,15 +80,17 @@ def launch_setup(context):
     osm_origin_lon = context.launch_configurations.get('osm_origin_lon', '0.0')
     osm_decay_meters = context.launch_configurations.get('osm_decay_meters', '2.0')
     
-    # Get package share directory
+    # Resolve source directory from the install path so data is read from src/
+    # install/<pkg>/share/<pkg> -> workspace root -> src/BKISemanticMapping
     pkg_share_dir = get_package_share_directory('semantic_bki')
+    ws_root = os.path.abspath(os.path.join(pkg_share_dir, '..', '..', '..', '..'))
+    pkg_src_dir = os.path.join(ws_root, 'src', 'BKISemanticMapping')
     
-    # Construct paths
-    method_config_path = os.path.join(pkg_share_dir, 'config', 'methods', f'{method}.yaml')
-    data_config_path = os.path.join(pkg_share_dir, 'config', 'datasets', f'{dataset}.yaml')
-    data_dir_path = os.path.join(pkg_share_dir, 'data', dataset)
-    calib_file_path = os.path.join(pkg_share_dir, 'data', dataset, 'hhs_calib.yaml')
-    rviz_config_path = os.path.join(pkg_share_dir, 'rviz', 'mcd_node.rviz')
+    method_config_path = os.path.join(pkg_src_dir, 'config', 'methods', f'{method}.yaml')
+    data_config_path = os.path.join(pkg_src_dir, 'config', 'datasets', f'{dataset}.yaml')
+    data_dir_path = os.path.join(pkg_src_dir, 'data', dataset)
+    calib_file_path = os.path.join(pkg_src_dir, 'data', dataset, 'hhs_calib.yaml')
+    rviz_config_path = os.path.join(pkg_src_dir, 'rviz', 'mcd_node.rviz')
     
     # RViz node
     rviz_node = Node(

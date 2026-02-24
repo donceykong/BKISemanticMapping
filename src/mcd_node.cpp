@@ -85,6 +85,9 @@ int main(int argc, char **argv) {
     node->declare_parameter<double>("osm_origin_lon", 0.0);
     node->declare_parameter<double>("osm_decay_meters", 2.0);
     node->declare_parameter<double>("osm_tree_point_radius_meters", 5.0);
+    node->declare_parameter<bool>("use_multiclass", false);
+    node->declare_parameter<std::string>("multiclass_prefix", "");
+    node->declare_parameter<std::string>("label_config", "");
 
     // Get parameters
     node->get_parameter<std::string>("map_topic", map_topic);
@@ -206,18 +209,56 @@ int main(int argc, char **argv) {
       return 1;
     }
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Calibration loaded successfully");
-    
+
+    // Multiclass inference setup
+    bool use_multiclass = false;
+    std::string multiclass_prefix, label_config;
+    node->get_parameter<bool>("use_multiclass", use_multiclass);
+    node->get_parameter<std::string>("multiclass_prefix", multiclass_prefix);
+    node->get_parameter<std::string>("label_config", label_config);
+
+    if (use_multiclass) {
+      std::string multiclass_dir = dir + '/' + multiclass_prefix;
+      mcd_data.set_multiclass_mode(true, multiclass_dir);
+
+      if (!label_config.empty()) {
+        // dir is <pkg_root>/data/<dataset>; derive config path from the same root
+        std::string label_config_path;
+        size_t data_pos = dir.rfind("/data/");
+        if (data_pos != std::string::npos) {
+          label_config_path = dir.substr(0, data_pos) + "/config/datasets/" + label_config;
+        } else {
+          label_config_path = ament_index_cpp::get_package_share_directory("semantic_bki")
+                              + "/config/datasets/" + label_config;
+        }
+        if (!mcd_data.load_label_config(label_config_path)) {
+          RCLCPP_WARN_STREAM(node->get_logger(),
+              "Failed to load label config from " << label_config_path
+              << ". Argmax class indices will be used as-is.");
+        }
+      } else {
+        RCLCPP_WARN_STREAM(node->get_logger(),
+            "use_multiclass=true but no label_config set. "
+            "Argmax class indices will be used as-is (no learning_map_inv).");
+      }
+    }
+
     // Load colors from YAML file specified in colors_file parameter
     // Load directly into MarkerArrayPub instead of using ROS parameters
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: About to load colors");
     if (colors_file.empty()) {
       RCLCPP_WARN_STREAM(node->get_logger(), "WARNING: No colors_file specified in dataset config. Using default hardcoded colors.");
     } else {
-      std::string pkg_path = ament_index_cpp::get_package_share_directory("semantic_bki");
-      if (pkg_path.empty()) {
-        RCLCPP_WARN_STREAM(node->get_logger(), "WARNING: Could not find semantic_bki package path!");
+      // Derive config path from dir (<pkg_root>/data/<dataset>)
+      std::string colors_file_path;
+      size_t dp = dir.rfind("/data/");
+      if (dp != std::string::npos) {
+        colors_file_path = dir.substr(0, dp) + "/config/datasets/" + colors_file;
       } else {
-        std::string colors_file_path = pkg_path + "/config/datasets/" + colors_file;
+        colors_file_path = ament_index_cpp::get_package_share_directory("semantic_bki")
+                           + "/config/datasets/" + colors_file;
+      }
+      {
         RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Colors file path: " << colors_file_path);
         RCLCPP_INFO_STREAM(node->get_logger(), "Loading colors from file specified in config: " << colors_file_path);
         // Load colors directly into MarkerArrayPub (bypasses ROS parameter system)

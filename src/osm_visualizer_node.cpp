@@ -17,8 +17,8 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<rclcpp::Node>("osm_visualizer_node");
 
     node->declare_parameter<std::string>("osm_file", "");
-    node->declare_parameter<double>("osm_origin_lat", 59.348268650);
-    node->declare_parameter<double>("osm_origin_lon", 18.073204280);
+    node->declare_parameter<double>("osm_origin_lat", 59.347671416);
+    node->declare_parameter<double>("osm_origin_lon", 18.072069652);
     node->declare_parameter<double>("publish_rate", 2.0);
     node->declare_parameter<std::string>("topic", "/osm_geometries");
     node->declare_parameter<double>("tree_point_radius_meters", 5.0);
@@ -53,10 +53,14 @@ int main(int argc, char** argv) {
     if (osm_file[0] != '/') {
         std::ifstream check(osm_file);
         if (!check.good()) {
-            try {
-                std::string pkg_share = ament_index_cpp::get_package_share_directory("semantic_bki");
-                full_path = pkg_share + "/data/mcd/" + osm_file;
-            } catch (...) {}
+            if (!data_dir.empty()) {
+                full_path = data_dir + "/" + osm_file;
+            } else {
+                try {
+                    std::string pkg_share = ament_index_cpp::get_package_share_directory("semantic_bki");
+                    full_path = pkg_share + "/data/mcd/" + osm_file;
+                } catch (...) {}
+            }
         }
     }
 
