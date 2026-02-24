@@ -4,6 +4,7 @@
 #include <sstream>
 #include <vector>
 #include <set>
+#include <map>
 #include <string>
 #include <memory>
 #include <thread>
@@ -11,6 +12,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <algorithm>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -30,6 +33,32 @@
 #include "bkioctomap.h"
 #include "markerarray_pub.h"
 #include "osm_geometry.h"
+
+/// Convert IEEE 754 half-precision (uint16) to single-precision float.
+static inline float half_to_float(uint16_t h) {
+    uint32_t sign     = (static_cast<uint32_t>(h) & 0x8000u) << 16;
+    uint32_t exponent = (h >> 10) & 0x1Fu;
+    uint32_t mantissa = h & 0x03FFu;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            float f; uint32_t r = sign;
+            std::memcpy(&f, &r, sizeof(f));
+            return f;
+        }
+        while (!(mantissa & 0x0400u)) { mantissa <<= 1; exponent--; }
+        exponent++; mantissa &= ~0x0400u;
+    } else if (exponent == 31) {
+        uint32_t r = sign | 0x7F800000u | (mantissa << 13);
+        float f; std::memcpy(&f, &r, sizeof(f));
+        return f;
+    }
+
+    exponent += (127 - 15);
+    uint32_t r = sign | (exponent << 23) | (mantissa << 13);
+    float f; std::memcpy(&f, &r, sizeof(f));
+    return f;
+}
 
 class MCDData {
   public:
@@ -84,7 +113,8 @@ class MCDData {
         // Will be set by load_calibration_from_params() - if not set, will error
         body_to_lidar_tf_ = Eigen::Matrix4d::Zero();  // Set to zero to detect if not loaded
         original_first_pose_ = Eigen::Matrix4d::Identity();  // Will be set when poses are loaded
-        scan_indices_.clear();  // Initialize scan indices vector
+        scan_indices_.clear();
+        use_multiclass_ = false;
         RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MCDData constructor completed");
       }
 
@@ -214,6 +244,44 @@ class MCDData {
       return original_first_pose_;
     }
 
+    /// Enable multiclass inference: read per-class confidence scores and take argmax.
+    void set_multiclass_mode(bool use_mc, const std::string& multiclass_dir) {
+      use_multiclass_ = use_mc;
+      multiclass_dir_ = multiclass_dir;
+      if (use_mc) {
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "Multiclass mode enabled. Scores dir: " << multiclass_dir);
+      }
+    }
+
+    /// Load learning_map_inv from a label config YAML (e.g. labels_semkitti.yaml).
+    /// Returns true on success.
+    bool load_label_config(const std::string& yaml_path) {
+      try {
+        YAML::Node cfg = YAML::LoadFile(yaml_path);
+        if (!cfg["learning_map_inv"]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(),
+              "No 'learning_map_inv' key in " << yaml_path);
+          return false;
+        }
+        learning_map_inv_.clear();
+        for (auto it = cfg["learning_map_inv"].begin();
+             it != cfg["learning_map_inv"].end(); ++it) {
+          int class_idx = it->first.as<int>();
+          int label_id  = it->second.as<int>();
+          learning_map_inv_[class_idx] = label_id;
+        }
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "Loaded learning_map_inv with " << learning_map_inv_.size()
+            << " entries from " << yaml_path);
+        return true;
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(),
+            "Failed to load label config: " << e.what());
+        return false;
+      }
+    }
+
     /// Set map visualization color mode: semantic class or OSM prior (building/road/grassland/tree).
     void set_color_mode(semantic_bki::MapColorMode mode) {
       if (m_pub_) m_pub_->set_color_mode(mode);
@@ -256,15 +324,21 @@ class MCDData {
       if (map_) map_->set_osm_decay_meters(decay_m);
     }
 
-    /// Return true if both the lidar bin and label file exist for the given scan file number.
+    /// Return true if both the lidar bin and label/multiclass file exist for the given scan file number.
     bool scan_and_label_exist(const std::string& input_data_dir, const std::string& input_label_dir, int scan_file_num) {
       char scan_id_c[256];
       std::snprintf(scan_id_c, sizeof(scan_id_c), "%010d", scan_file_num);
       std::string scan_name = input_data_dir + "/" + std::string(scan_id_c) + ".bin";
-      std::string label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
       FILE* fp = std::fopen(scan_name.c_str(), "rb");
       if (!fp) return false;
       std::fclose(fp);
+
+      std::string label_name;
+      if (use_multiclass_) {
+        label_name = multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
+      } else {
+        label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
+      }
       FILE* fp_label = std::fopen(label_name.c_str(), "rb");
       if (!fp_label) return false;
       std::fclose(fp_label);
@@ -319,9 +393,15 @@ class MCDData {
         char scan_id_c[256];
         sprintf(scan_id_c, "%010d", scan_file_num);
         std::string scan_name = input_data_dir + "/" + std::string(scan_id_c) + ".bin";
-        std::string label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
-        
-        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, label_name);
+
+        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud;
+        if (use_multiclass_) {
+          std::string mc_name = multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
+          cloud = mcd2pcl_multiclass(scan_name, mc_name);
+        } else {
+          std::string label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
+          cloud = mcd2pcl(scan_name, label_name);
+        }
         if (!cloud) {
           RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: mcd2pcl returned null pointer for scan " << scan_file_num);
           continue;
@@ -743,8 +823,13 @@ class MCDData {
     std::string gt_label_dir_;
     std::string evaluation_result_dir_;
     Eigen::Matrix4d init_trans_to_ground_;
-    Eigen::Matrix4d body_to_lidar_tf_;  // Body to LiDAR transformation from calibration
-    Eigen::Matrix4d original_first_pose_;  // Original first pose before transformation to origin (for OSM alignment)
+    Eigen::Matrix4d body_to_lidar_tf_;
+    Eigen::Matrix4d original_first_pose_;
+
+    // Multiclass inference settings
+    bool use_multiclass_;
+    std::string multiclass_dir_;
+    std::map<int, int> learning_map_inv_;
 
     pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl(std::string fn, std::string fn_label) {
       // Open scan file
@@ -839,6 +924,115 @@ class MCDData {
       //     << " points_read=" << points_read);
       // }
       
+      return pc;
+    }
+
+    /// Read lidar scan + multiclass confidence scores (float16), take argmax, apply learning_map_inv.
+    pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl_multiclass(
+        const std::string& fn, const std::string& fn_multiclass) {
+
+      auto empty = []() {
+        return pcl::PointCloud<pcl::PointXYZL>::Ptr(
+            new pcl::PointCloud<pcl::PointXYZL>);
+      };
+
+      FILE* fp = std::fopen(fn.c_str(), "rb");
+      if (!fp) {
+        RCLCPP_WARN_STREAM(node_->get_logger(),
+            "Cannot open scan file: " << fn);
+        return empty();
+      }
+
+      FILE* fp_mc = std::fopen(fn_multiclass.c_str(), "rb");
+      if (!fp_mc) {
+        RCLCPP_WARN_STREAM(node_->get_logger(),
+            "Cannot open multiclass file: " << fn_multiclass);
+        std::fclose(fp);
+        return empty();
+      }
+
+      // Scan: 4 floats per point (x, y, z, intensity)
+      std::fseek(fp, 0L, SEEK_END);
+      size_t scan_sz = std::ftell(fp);
+      std::rewind(fp);
+      int n_points = static_cast<int>(scan_sz / (sizeof(float) * 4));
+
+      // Multiclass: n_points * n_classes uint16 values (IEEE 754 half-precision)
+      std::fseek(fp_mc, 0L, SEEK_END);
+      size_t mc_sz = std::ftell(fp_mc);
+      std::rewind(fp_mc);
+      int n_mc_values = static_cast<int>(mc_sz / sizeof(uint16_t));
+
+      if (n_points == 0 || n_mc_values == 0) {
+        std::fclose(fp);
+        std::fclose(fp_mc);
+        return empty();
+      }
+
+      int n_classes = n_mc_values / n_points;
+      if (n_mc_values != n_points * n_classes) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(),
+            "Multiclass file size mismatch: " << n_mc_values
+            << " values for " << n_points << " points (not divisible)");
+        std::fclose(fp);
+        std::fclose(fp_mc);
+        return empty();
+      }
+
+      RCLCPP_INFO_STREAM(node_->get_logger(),
+          "Multiclass: " << n_points << " points x " << n_classes << " classes");
+
+      // Read all multiclass data at once
+      std::vector<uint16_t> mc_raw(n_mc_values);
+      if (std::fread(mc_raw.data(), sizeof(uint16_t), n_mc_values, fp_mc)
+          != static_cast<size_t>(n_mc_values)) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(),
+            "Failed to read multiclass data from " << fn_multiclass);
+        std::fclose(fp);
+        std::fclose(fp_mc);
+        return empty();
+      }
+      std::fclose(fp_mc);
+
+      pcl::PointCloud<pcl::PointXYZL>::Ptr pc(
+          new pcl::PointCloud<pcl::PointXYZL>);
+      pc->points.reserve(n_points);
+      pc->width = n_points;
+      pc->height = 1;
+      pc->is_dense = false;
+
+      std::vector<float> row(n_classes);
+
+      for (int i = 0; i < n_points; i++) {
+        pcl::PointXYZL point;
+        float intensity;
+        if (std::fread(&point.x, sizeof(float), 1, fp) != 1) break;
+        if (std::fread(&point.y, sizeof(float), 1, fp) != 1) break;
+        if (std::fread(&point.z, sizeof(float), 1, fp) != 1) break;
+        if (std::fread(&intensity, sizeof(float), 1, fp) != 1) break;
+
+        // Convert float16 row → float32 and find argmax
+        const uint16_t* row_ptr = mc_raw.data() + static_cast<size_t>(i) * n_classes;
+        int best_class = 0;
+        float best_val = half_to_float(row_ptr[0]);
+        for (int c = 1; c < n_classes; c++) {
+          float v = half_to_float(row_ptr[c]);
+          if (v > best_val) {
+            best_val = v;
+            best_class = c;
+          }
+        }
+
+        // Map class index → label ID via learning_map_inv
+        auto it = learning_map_inv_.find(best_class);
+        int label_id = (it != learning_map_inv_.end()) ? it->second : best_class;
+
+        point.label = static_cast<uint32_t>(label_id);
+        pc->points.push_back(point);
+      }
+
+      std::fclose(fp);
+      pc->width = static_cast<uint32_t>(pc->points.size());
       return pc;
     }
 };

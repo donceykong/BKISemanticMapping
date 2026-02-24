@@ -27,6 +27,8 @@ namespace {
     // Handler class for extracting buildings, roads, sidewalks, grasslands, trees (ways + nodes + multipolygons) from OSM data using libosmium
     class OSMGeometryHandler : public osmium::handler::Handler {
     public:
+        static constexpr double EARTH_RADIUS_M = 6378137.0;
+
         OSMGeometryHandler(double origin_lat, double origin_lon,
                           std::vector<semantic_bki::Geometry2D>& buildings,
                           std::vector<semantic_bki::Geometry2D>& roads,
@@ -40,8 +42,19 @@ namespace {
             : origin_lat_(origin_lat), origin_lon_(origin_lon),
               buildings_(buildings), roads_(roads), sidewalks_(sidewalks), parking_(parking), fences_(fences), stairs_(stairs),
               grasslands_(grasslands), trees_(trees), tree_points_(tree_points) {
-            kMetersPerDegLat_ = 110540.0;
-            kMetersPerDegLon_ = 111320.0 * std::cos(origin_lat * M_PI / 180.0);
+            scale_ = std::cos(origin_lat * M_PI / 180.0);
+            double origin_lon_rad = origin_lon * M_PI / 180.0;
+            double origin_lat_rad = origin_lat * M_PI / 180.0;
+            origin_mx_ = scale_ * origin_lon_rad * EARTH_RADIUS_M;
+            origin_my_ = scale_ * EARTH_RADIUS_M * std::log(std::tan(M_PI / 4.0 + origin_lat_rad / 2.0));
+        }
+
+        std::pair<float, float> latlon_to_xy(double lat, double lon) const {
+            double lon_rad = lon * M_PI / 180.0;
+            double lat_rad = lat * M_PI / 180.0;
+            double mx = scale_ * lon_rad * EARTH_RADIUS_M;
+            double my = scale_ * EARTH_RADIUS_M * std::log(std::tan(M_PI / 4.0 + lat_rad / 2.0));
+            return {static_cast<float>(mx - origin_mx_), static_cast<float>(my - origin_my_)};
         }
 
         void node(const osmium::Node& node) {
@@ -54,11 +67,8 @@ namespace {
             if (!loc.valid()) {
                 return;
             }
-            double lat = loc.lat();
-            double lon = loc.lon();
-            float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
-            float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
-            tree_points_.push_back({x, y});
+            auto xy = latlon_to_xy(loc.lat(), loc.lon());
+            tree_points_.push_back(xy);
         }
 
         void way(const osmium::Way& way) {
@@ -67,12 +77,7 @@ namespace {
             for (const auto& node_ref : way.nodes()) {
                 const osmium::Location& location = node_ref.location();
                 if (location.valid()) {
-                    double lat = location.lat();
-                    double lon = location.lon();
-                    // Relative meters from origin (East, North) - same convention as ROS1 binary / create_scan_osm_topdown.py
-                    float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
-                    float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
-                    geom.coords.push_back({x, y});
+                    geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
                 }
             }
 
@@ -193,9 +198,7 @@ namespace {
                     for (const auto& node_ref : outer_ring) {
                         const osmium::Location& location = node_ref.location();
                         if (location.valid()) {
-                            float x = static_cast<float>((location.lon() - origin_lon_) * kMetersPerDegLon_);
-                            float y = static_cast<float>((location.lat() - origin_lat_) * kMetersPerDegLat_);
-                            geom.coords.push_back({x, y});
+                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
                         }
                     }
                     if (geom.coords.size() >= 3) parking_.push_back(geom);
@@ -212,15 +215,9 @@ namespace {
                     for (const auto& node_ref : outer_ring) {
                         const osmium::Location& location = node_ref.location();
                         if (location.valid()) {
-                            double lat = location.lat();
-                            double lon = location.lon();
-                            float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
-                            float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
-                            geom.coords.push_back({x, y});
+                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
                         }
                     }
-                    // Note: inner rings (holes) are ignored for now - we treat multipolygons as filled polygons
-                    // To handle holes properly, we'd need to use a polygon-with-holes data structure
                     if (geom.coords.size() >= 3) {
                         buildings_.push_back(geom);
                     }
@@ -238,11 +235,7 @@ namespace {
                         for (const auto& node_ref : outer_ring) {
                             const osmium::Location& location = node_ref.location();
                             if (location.valid()) {
-                                double lat = location.lat();
-                                double lon = location.lon();
-                                float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
-                                float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
-                                geom.coords.push_back({x, y});
+                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
                             }
                         }
                         if (geom.coords.size() >= 3) {
@@ -263,11 +256,7 @@ namespace {
                         for (const auto& node_ref : outer_ring) {
                             const osmium::Location& location = node_ref.location();
                             if (location.valid()) {
-                                double lat = location.lat();
-                                double lon = location.lon();
-                                float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
-                                float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
-                                geom.coords.push_back({x, y});
+                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
                             }
                         }
                         if (geom.coords.size() >= 3) {
@@ -283,11 +272,7 @@ namespace {
                     for (const auto& node_ref : outer_ring) {
                         const osmium::Location& location = node_ref.location();
                         if (location.valid()) {
-                            double lat = location.lat();
-                            double lon = location.lon();
-                            float x = static_cast<float>((lon - origin_lon_) * kMetersPerDegLon_);
-                            float y = static_cast<float>((lat - origin_lat_) * kMetersPerDegLat_);
-                            geom.coords.push_back({x, y});
+                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
                         }
                     }
                     if (geom.coords.size() >= 3) {
@@ -299,7 +284,7 @@ namespace {
 
     private:
         double origin_lat_, origin_lon_;
-        double kMetersPerDegLat_, kMetersPerDegLon_;
+        double scale_, origin_mx_, origin_my_;
         std::vector<semantic_bki::Geometry2D>& buildings_;
         std::vector<semantic_bki::Geometry2D>& roads_;
         std::vector<semantic_bki::Geometry2D>& sidewalks_;
@@ -1052,20 +1037,13 @@ namespace semantic_bki {
             return;
         }
         
-        // Same as BKISemanticMapping_ROS1_ORIG: OSM coordinates are "relative to origin_latlon" (East, North in meters).
-        // Binary / Python use: world = first_pose_position + relative; then map = first_pose_inverse * world.
-        // So we first add first_pose translation to get world coords, then apply first_pose_inverse.
+        // OSM origin = world-frame origin GPS (matching Python MCD_ORIGIN_LATLON).
+        // OSM coordinates are already in the world frame. Apply first_pose_inverse
+        // to convert to the normalized frame (first pose at origin).
         Eigen::Matrix4d first_pose_inverse = first_pose.inverse();
         
-        // RCLCPP_INFO_STREAM(node_->get_logger(), "Transforming OSM geometries to be relative to first pose (same as ROS1_ORIG)...");
-        // RCLCPP_INFO_STREAM(node_->get_logger(), "First pose translation: [" << first_pose(0,3) << ", " << first_pose(1,3) << ", " << first_pose(2,3) << "]");
-        // RCLCPP_INFO_STREAM(node_->get_logger(), "Step 1: local_to_world = point + first_pose_translation; Step 2: map = first_pose_inverse * world");
-        
-        auto transformPoint = [&first_pose, &first_pose_inverse](float& x, float& y) {
-            // Local (relative to origin_latlon) -> world: add first pose translation (as in create_scan_osm_topdown.py)
-            double world_x = x + first_pose(0, 3);
-            double world_y = y + first_pose(1, 3);
-            Eigen::Vector4d point(world_x, world_y, 0.0, 1.0);
+        auto transformPoint = [&first_pose_inverse](float& x, float& y) {
+            Eigen::Vector4d point(static_cast<double>(x), static_cast<double>(y), 0.0, 1.0);
             Eigen::Vector4d transformed = first_pose_inverse * point;
             x = static_cast<float>(transformed(0));
             y = static_cast<float>(transformed(1));
