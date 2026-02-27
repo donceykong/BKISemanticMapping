@@ -90,6 +90,7 @@ int main(int argc, char **argv) {
     node->declare_parameter<std::string>("label_config", "");
     node->declare_parameter<bool>("use_uncertainty_filter", false);
     node->declare_parameter<std::string>("inferred_labels_key", "mcd");
+    node->declare_parameter<std::string>("gt_labels_key", "mcd");
     node->declare_parameter<std::string>("confusion_matrix_file", "");
     node->declare_parameter<std::string>("uncertainty_filter_mode", "confusion_matrix");
     node->declare_parameter<double>("uncertainty_drop_percent", 10.0);
@@ -217,6 +218,28 @@ int main(int argc, char **argv) {
       return 1;
     }
     RCLCPP_WARN_STREAM(node->get_logger(), "CHECKPOINT: Calibration loaded successfully");
+
+    // Load common taxonomy label mappings (raw labels → common class indices)
+    {
+      std::string inferred_labels_key, gt_labels_key;
+      node->get_parameter<std::string>("inferred_labels_key", inferred_labels_key);
+      node->get_parameter<std::string>("gt_labels_key", gt_labels_key);
+
+      std::string common_label_path;
+      size_t dp = dir.rfind("/data/");
+      if (dp != std::string::npos) {
+        common_label_path = dir.substr(0, dp) + "/config/datasets/labels_common.yaml";
+      } else {
+        common_label_path = ament_index_cpp::get_package_share_directory("semantic_bki")
+                            + "/config/datasets/labels_common.yaml";
+      }
+      if (!mcd_data.load_common_label_config(common_label_path, inferred_labels_key, gt_labels_key)) {
+        RCLCPP_FATAL_STREAM(node->get_logger(),
+            "Failed to load common label config from " << common_label_path
+            << ". Cannot proceed without label mappings.");
+        return 1;
+      }
+    }
 
     // Multiclass inference setup
     bool use_multiclass = false;

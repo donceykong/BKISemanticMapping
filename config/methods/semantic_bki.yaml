@@ -7,13 +7,13 @@
 
     # Kernel parameters
     sf2: 10.0 # Actually sigma_0 in sparse kernel
-    ell: 1.5  # Length scale of the sparse kernel (using 3 * resolution)
+    ell: 0.75  # Length scale of the sparse kernel (using 3 * resolution)
 
     # BGK Inference class prior pseudocounts
     prior: 0.001 # each class
 
     # Threshold on variance to distinguish known/unknown
-    var_thresh: 0.09
+    var_thresh: 0.09 # 0.09
 
     # Free/Occupied Thresholds
     free_thresh: 0.3

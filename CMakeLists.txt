@@ -173,7 +173,9 @@ ament_target_dependencies(semantickitti_node
   std_msgs
   sensor_msgs
   pcl_conversions
+  ament_index_cpp
   OpenCV
+  yaml-cpp
 )
 
 ament_target_dependencies(mcd_node
@@ -205,6 +207,7 @@ target_link_libraries(kitti_node
 target_link_libraries(semantickitti_node
   ${OpenCV_LIBRARIES}
   ${PCL_LIBRARIES}
+  yaml-cpp
 )
 
 target_link_libraries(mcd_node

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <fstream>
+#include <map>
 #include <memory>
 
 #include <rclcpp/rclcpp.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
@@ -124,6 +126,56 @@ class SemanticKITTIData {
       return false;
     }
 
+    // Load colors from YAML file
+    bool load_colors_from_yaml(const std::string& yaml_file_path) {
+      if (m_pub_) {
+        return m_pub_->load_colors_from_yaml(yaml_file_path);
+      }
+      return false;
+    }
+
+    /// Load common taxonomy mappings from labels_common.yaml.
+    bool load_common_label_config(const std::string& yaml_path,
+                                  const std::string& inferred_key,
+                                  const std::string& gt_key) {
+      try {
+        YAML::Node cfg = YAML::LoadFile(yaml_path);
+        std::string inf_map_key = inferred_key + "_to_common";
+        std::string gt_map_key  = gt_key + "_to_common";
+
+        if (!cfg[inf_map_key]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(),
+              "No '" << inf_map_key << "' key in " << yaml_path);
+          return false;
+        }
+        if (!cfg[gt_map_key]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(),
+              "No '" << gt_map_key << "' key in " << yaml_path);
+          return false;
+        }
+
+        inferred_to_common_.clear();
+        for (auto it = cfg[inf_map_key].begin(); it != cfg[inf_map_key].end(); ++it)
+          inferred_to_common_[it->first.as<int>()] = it->second.as<int>();
+
+        gt_to_common_.clear();
+        for (auto it = cfg[gt_map_key].begin(); it != cfg[gt_map_key].end(); ++it)
+          gt_to_common_[it->first.as<int>()] = it->second.as<int>();
+
+        common_label_config_loaded_ = true;
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "Loaded common label config from " << yaml_path
+            << ": inferred mapping '" << inf_map_key << "' (" << inferred_to_common_.size()
+            << " entries), GT mapping '" << gt_map_key << "' (" << gt_to_common_.size()
+            << " entries)");
+        return true;
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(),
+            "Failed to load common label config: " << e.what());
+        return false;
+      }
+    }
+
     void set_up_evaluation(const std::string gt_label_dir, const std::string evaluation_result_dir) {
       gt_label_dir_ = gt_label_dir;
       evaluation_result_dir_ = evaluation_result_dir;
@@ -135,7 +187,7 @@ class SemanticKITTIData {
       std::string scan_name = input_data_dir + std::string(scan_id_c) + ".bin";
       std::string gt_name = gt_label_dir_ + std::string(scan_id_c) + ".label";
       std::string result_name = evaluation_result_dir_ + std::string(scan_id_c) + ".txt";
-      pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = kitti2pcl(scan_name, gt_name);
+      pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = kitti2pcl(scan_name, gt_name, /*use_gt_mapping=*/true);
       Eigen::Matrix4d transform = lidar_poses_[scan_id];
       Eigen::Matrix4d calibration;
       
@@ -187,6 +239,11 @@ class SemanticKITTIData {
     std::string evaluation_result_dir_;
     Eigen::Matrix4d init_trans_to_ground_;
 
+    // Common taxonomy mappings (loaded from labels_common.yaml)
+    bool common_label_config_loaded_ = false;
+    std::map<int, int> inferred_to_common_;
+    std::map<int, int> gt_to_common_;
+
     int check_element_in_vector(const long long element, const std::vector<long long>& vec_check) {
       for (int i = 0; i < vec_check.size(); ++i)
         if (element == vec_check[i])
@@ -194,7 +251,7 @@ class SemanticKITTIData {
       return -1;
     }
 
-    pcl::PointCloud<pcl::PointXYZL>::Ptr kitti2pcl(std::string fn, std::string fn_label) {
+    pcl::PointCloud<pcl::PointXYZL>::Ptr kitti2pcl(std::string fn, std::string fn_label, bool use_gt_mapping = false) {
       FILE* fp_label = std::fopen(fn_label.c_str(), "r");
       if (!fp_label) {
         std::perror("File opening failed");
@@ -217,7 +274,17 @@ class SemanticKITTIData {
         if (fread(&point.y, sizeof(float), 1, fp) == 0) break;
         if (fread(&point.z, sizeof(float), 1, fp) == 0) break;
         if (fread(&intensity, sizeof(float), 1, fp) == 0) break;
-        if (fread(&point.label, sizeof(float), 1, fp_label) == 0) break;
+        float raw_label;
+        if (fread(&raw_label, sizeof(float), 1, fp_label) == 0) break;
+
+        int raw = static_cast<int>(raw_label);
+        if (common_label_config_loaded_) {
+          const auto& mapping = use_gt_mapping ? gt_to_common_ : inferred_to_common_;
+          auto it = mapping.find(raw);
+          point.label = (it != mapping.end()) ? it->second : 0;
+        } else {
+          point.label = raw;
+        }
         pc->push_back(point);
       }
       std::fclose(fp);

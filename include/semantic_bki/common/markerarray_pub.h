@@ -634,10 +634,11 @@ namespace semantic_bki {
                 if (yaml_node["/**"] && yaml_node["/**"]["ros__parameters"] && yaml_node["/**"]["ros__parameters"]["colors"]) {
                     colors_node = yaml_node["/**"]["ros__parameters"]["colors"];
                 } else if (yaml_node["colors"]) {
-                    // Fallback: try direct access (for non-ROS2 format)
                     colors_node = yaml_node["colors"];
+                } else if (yaml_node["color_map"]) {
+                    colors_node = yaml_node["color_map"];
                 } else {
-                    RCLCPP_WARN_STREAM(node_->get_logger(), "No 'colors' key found in YAML file: " << yaml_file_path);
+                    RCLCPP_WARN_STREAM(node_->get_logger(), "No 'colors' or 'color_map' key found in YAML file: " << yaml_file_path);
                     return false;
                 }
                 

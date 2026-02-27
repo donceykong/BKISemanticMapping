@@ -35,35 +35,9 @@
 #include "osm_geometry.h"
 
 // ---------------------------------------------------------------------------
-// Common taxonomy (13 classes) — matches Python label_mappings.py
+// Common taxonomy (13 classes) — loaded from labels_common.yaml at runtime.
 // ---------------------------------------------------------------------------
 static constexpr int N_COMMON = 13;
-
-static const std::map<int, int>& get_mcd_to_common() {
-  static const std::map<int, int> m = {
-    {0,6},{1,10},{2,5},{3,12},{4,4},{5,12},{6,4},{7,6},
-    {8,12},{9,8},{10,1},{11,0},{12,12},{13,3},{14,12},
-    {15,7},{16,1},{17,5},{18,2},{19,4},{20,12},{21,8},
-    {22,8},{23,12},{24,9},{25,9},{26,11},{27,11},{28,11}
-  };
-  return m;
-}
-
-static const std::map<int, int>& get_semkitti_to_common() {
-  static const std::map<int, int> m = {
-    {0,0},{1,0},{10,11},{11,10},{13,11},{15,10},{16,11},
-    {18,11},{20,11},{30,12},{31,12},{32,12},{40,1},{44,3},
-    {48,2},{49,4},{50,5},{51,6},{52,12},{60,1},{70,9},
-    {71,9},{72,4},{80,7},{81,8},{99,12},{252,11},{253,12},
-    {254,12},{255,12},{256,11},{257,11},{258,11},{259,11}
-  };
-  return m;
-}
-
-static int raw_to_common(int raw_label, const std::map<int, int>& mapping) {
-  auto it = mapping.find(raw_label);
-  return (it != mapping.end()) ? it->second : 0;
-}
 
 struct MulticlassResult {
   pcl::PointCloud<pcl::PointXYZL>::Ptr cloud;
@@ -152,6 +126,7 @@ class MCDData {
         original_first_pose_ = Eigen::Matrix4d::Identity();  // Will be set when poses are loaded
         scan_indices_.clear();
         use_multiclass_ = false;
+        common_label_config_loaded_ = false;
         use_uncertainty_filter_ = false;
         confusion_matrix_loaded_ = false;
         uncertainty_filter_mode_ = "confusion_matrix";
@@ -328,6 +303,51 @@ class MCDData {
       }
     }
 
+    /// Load common taxonomy mappings from labels_common.yaml.
+    /// @param yaml_path       Path to labels_common.yaml.
+    /// @param inferred_key    "mcd" or "semkitti" — picks <key>_to_common for inferred labels.
+    /// @param gt_key          "mcd" or "semkitti" — picks <key>_to_common for GT labels.
+    bool load_common_label_config(const std::string& yaml_path,
+                                  const std::string& inferred_key,
+                                  const std::string& gt_key) {
+      try {
+        YAML::Node cfg = YAML::LoadFile(yaml_path);
+        std::string inf_map_key = inferred_key + "_to_common";
+        std::string gt_map_key  = gt_key + "_to_common";
+
+        if (!cfg[inf_map_key]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(),
+              "No '" << inf_map_key << "' key in " << yaml_path);
+          return false;
+        }
+        if (!cfg[gt_map_key]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(),
+              "No '" << gt_map_key << "' key in " << yaml_path);
+          return false;
+        }
+
+        inferred_to_common_.clear();
+        for (auto it = cfg[inf_map_key].begin(); it != cfg[inf_map_key].end(); ++it)
+          inferred_to_common_[it->first.as<int>()] = it->second.as<int>();
+
+        gt_to_common_.clear();
+        for (auto it = cfg[gt_map_key].begin(); it != cfg[gt_map_key].end(); ++it)
+          gt_to_common_[it->first.as<int>()] = it->second.as<int>();
+
+        common_label_config_loaded_ = true;
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "Loaded common label config from " << yaml_path
+            << ": inferred mapping '" << inf_map_key << "' (" << inferred_to_common_.size()
+            << " entries), GT mapping '" << gt_map_key << "' (" << gt_to_common_.size()
+            << " entries)");
+        return true;
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(),
+            "Failed to load common label config: " << e.what());
+        return false;
+      }
+    }
+
     void set_uncertainty_filter(bool enabled, const std::string& labels_key,
                                const std::string& mode = "confusion_matrix",
                                float drop_percent = 10.0f,
@@ -474,16 +494,14 @@ class MCDData {
             matrix[row][c] = vals[c].as<float>();
         }
 
-        // Build reverse mapping: for each row, which raw labels map to it
-        const auto &sk_to_common = get_semkitti_to_common();
+        // Labels in ybars are now common taxonomy indices, so each confusion
+        // matrix row maps directly to its common class ID.
         std::vector<std::vector<int>> row_to_labels(n_rows);
-        for (const auto &kv : sk_to_common) {
-          int common_class = kv.second;
-          if (common_class <= 0 || common_class > 12) continue;
-          if (!lm_node[common_class]) continue;
-          int row = lm_node[common_class].as<int>();
-          if (row >= 0 && row < n_rows)
-            row_to_labels[row].push_back(kv.first);
+        for (auto it = lm_node.begin(); it != lm_node.end(); ++it) {
+          int common_class = it->first.as<int>();
+          int row = it->second.as<int>();
+          if (common_class > 0 && row >= 0 && row < n_rows)
+            row_to_labels[row].push_back(common_class);
         }
 
         map_->set_osm_confusion_matrix(matrix, row_to_labels);
@@ -627,17 +645,14 @@ class MCDData {
               }
 
             } else if (confusion_matrix_loaded_) {
-              // Per-class precision: filter (drop) points entirely
-              const auto& inf_common_map = (inferred_labels_key_ == "semkitti")
-                  ? get_semkitti_to_common() : get_mcd_to_common();
-
+              // Per-class precision: filter (drop) points entirely.
+              // Labels are already in common taxonomy after ingestion.
               pcl::PointCloud<pcl::PointXYZL>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZL>);
               filtered->points.reserve(n_pts);
               int n_dropped = 0;
 
               for (size_t pi = 0; pi < n_pts; ++pi) {
-                int pred_common = raw_to_common(
-                    static_cast<int>(cloud->points[pi].label), inf_common_map);
+                int pred_common = static_cast<int>(cloud->points[pi].label);
                 float precision = (pred_common > 0 && pred_common < N_COMMON)
                     ? class_precision_[pred_common] : 1.0f;
                 if (uncertainties[pi] <= precision || pred_common == 0) {
@@ -1025,7 +1040,7 @@ class MCDData {
         std::string gt_name = join_path(gt_label_dir_, std::string(scan_id_c) + ".bin");
         std::string result_name = join_path(evaluation_result_dir_, std::string(scan_id_c) + ".txt");
         
-        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, gt_name);
+        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, gt_name, /*use_gt_mapping=*/true);
         if (cloud->points.empty()) {
           return;
         }
@@ -1104,6 +1119,11 @@ class MCDData {
     std::string multiclass_dir_;
     std::map<int, int> learning_map_inv_;
 
+    // Common taxonomy mappings (loaded from labels_common.yaml)
+    bool common_label_config_loaded_;
+    std::map<int, int> inferred_to_common_;  // raw inferred label → common class index
+    std::map<int, int> gt_to_common_;        // raw GT label → common class index
+
     // Uncertainty filtering
     bool use_uncertainty_filter_;
     bool confusion_matrix_loaded_;
@@ -1117,7 +1137,7 @@ class MCDData {
     int total_points_filtered_;
     std::vector<float> scan_point_weights_;
 
-    pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl(std::string fn, std::string fn_label) {
+    pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl(std::string fn, std::string fn_label, bool use_gt_mapping = false) {
       // Open scan file
       FILE* fp = std::fopen(fn.c_str(), "rb");
       if (!fp) {
@@ -1173,10 +1193,17 @@ class MCDData {
         if (fread(&point.z, sizeof(float), 1, fp) != 1) break;
         if (fread(&intensity, sizeof(float), 1, fp) != 1) break;
 
-        // Read label (uint32)
+        // Read label (uint32) and map to common taxonomy
         if (fread(&label, sizeof(uint32_t), 1, fp_label) != 1) break;
 
-        point.label = static_cast<int>(label);
+        int raw = static_cast<int>(label);
+        if (common_label_config_loaded_) {
+          const auto& mapping = use_gt_mapping ? gt_to_common_ : inferred_to_common_;
+          auto it = mapping.find(raw);
+          point.label = (it != mapping.end()) ? it->second : 0;
+        } else {
+          point.label = raw;
+        }
         unique_labels.insert(point.label);
         pc->points.push_back(point);
         points_read++;
@@ -1314,10 +1341,19 @@ class MCDData {
         if (variance < 0.0f) variance = 0.0f;
         result.variances.push_back(variance);
 
-        auto it = learning_map_inv_.find(best_class);
-        int label_id = (it != learning_map_inv_.end()) ? it->second : best_class;
-
-        point.label = static_cast<uint32_t>(label_id);
+        // Network class index → raw label (via learning_map_inv) → common class
+        int raw_label = best_class;
+        if (!learning_map_inv_.empty()) {
+          auto it_inv = learning_map_inv_.find(best_class);
+          if (it_inv != learning_map_inv_.end()) raw_label = it_inv->second;
+        }
+        int common_label = raw_label;
+        if (common_label_config_loaded_) {
+          auto it_c = inferred_to_common_.find(raw_label);
+          if (it_c != inferred_to_common_.end()) common_label = it_c->second;
+          else common_label = 0;
+        }
+        point.label = static_cast<uint32_t>(common_label);
         pc->points.push_back(point);
       }
 

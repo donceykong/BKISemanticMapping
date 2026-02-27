@@ -1,6 +1,7 @@
 #include <string>
 #include <iostream>
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include "bkioctomap.h"
 #include "markerarray_pub.h"
@@ -57,6 +58,9 @@ int main(int argc, char **argv) {
     node->declare_parameter<std::string>("evaluation_result_prefix", evaluation_result_prefix);
     node->declare_parameter<bool>("query", query);
     node->declare_parameter<bool>("visualize", visualize);
+    node->declare_parameter<std::string>("inferred_labels_key", "semkitti");
+    node->declare_parameter<std::string>("gt_labels_key", "semkitti");
+    node->declare_parameter<std::string>("colors_file", "");
 
     // Get parameters
     node->get_parameter<int>("block_depth", block_depth);
@@ -112,10 +116,52 @@ int main(int argc, char **argv) {
     SemanticKITTIData semantic_kitti_data(node, resolution, block_depth, sf2, ell, num_class, free_thresh, occupied_thresh, var_thresh, ds_resolution, free_resolution, max_range, map_topic, prior);
     semantic_kitti_data.read_lidar_poses(dir + '/' + lidar_pose_file);
     semantic_kitti_data.set_up_evaluation(dir + '/' + gt_label_prefix, dir + '/' + evaluation_result_prefix);
-    
-    // Load colors from ROS parameters (colors file should be loaded by launch file)
-    semantic_kitti_data.load_colors_from_params();
-    
+
+    // Load common taxonomy label mappings
+    {
+      std::string inferred_labels_key, gt_labels_key;
+      node->get_parameter<std::string>("inferred_labels_key", inferred_labels_key);
+      node->get_parameter<std::string>("gt_labels_key", gt_labels_key);
+
+      std::string common_label_path;
+      size_t dp = dir.rfind("/data/");
+      if (dp != std::string::npos) {
+        common_label_path = dir.substr(0, dp) + "/config/datasets/labels_common.yaml";
+      } else {
+        common_label_path = ament_index_cpp::get_package_share_directory("semantic_bki")
+                            + "/config/datasets/labels_common.yaml";
+      }
+      if (!semantic_kitti_data.load_common_label_config(common_label_path, inferred_labels_key, gt_labels_key)) {
+        RCLCPP_FATAL_STREAM(node->get_logger(),
+            "Failed to load common label config from " << common_label_path);
+        return 1;
+      }
+    }
+
+    // Load colors
+    {
+      std::string colors_file;
+      node->get_parameter<std::string>("colors_file", colors_file);
+      if (!colors_file.empty()) {
+        std::string colors_path;
+        size_t dp = dir.rfind("/data/");
+        if (dp != std::string::npos) {
+          colors_path = dir.substr(0, dp) + "/config/datasets/" + colors_file;
+        } else {
+          colors_path = ament_index_cpp::get_package_share_directory("semantic_bki")
+                        + "/config/datasets/" + colors_file;
+        }
+        if (semantic_kitti_data.load_colors_from_yaml(colors_path)) {
+          RCLCPP_INFO_STREAM(node->get_logger(), "Loaded colors from " << colors_path);
+        } else {
+          RCLCPP_WARN_STREAM(node->get_logger(), "Failed to load colors from " << colors_path << ". Using defaults.");
+          semantic_kitti_data.load_colors_from_params();
+        }
+      } else {
+        semantic_kitti_data.load_colors_from_params();
+      }
+    }
+
     semantic_kitti_data.process_scans(dir + '/' + input_data_prefix, dir + '/' + input_label_prefix, scan_num, query, visualize);
 
     rclcpp::spin(node);
