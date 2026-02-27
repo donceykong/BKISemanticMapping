@@ -360,12 +360,20 @@ namespace semantic_bki {
                                       const std::vector<std::vector<int>> &row_to_labels);
         void set_osm_prior_strength(float strength);
 
+        /// OSM height filter: scale OSM priors by height (z) so priors apply only within
+        /// typical height range of points in each OSM category. Uses per-scan mean ± k*std.
+        void set_osm_height_filter_enabled(bool enabled);
+        void set_osm_height_std_multiplier(float k);  // e.g. 2.0 for mean ± 2*std
+
     private:
         static constexpr int N_OSM_PRIOR_COLS = 8;
 
         void compute_osm_prior_vec(float x, float y, float osm_vec[N_OSM_PRIOR_COLS]) const;
 
-        void apply_osm_prior_to_ybars(std::vector<float> &ybars, float x, float y, float scale) const;
+        void apply_osm_prior_to_ybars(std::vector<float> &ybars, float x, float y, float z, float scale) const;
+
+        /// Compute per-OSM-category height stats (mean, std) from scan points; used for height filter.
+        void compute_osm_height_stats_from_cloud(const PCLPointCloud &cloud);
         /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points), parking (polygon), fence (polyline), stairs (polyline with width).
         float compute_osm_building_prior(float x, float y) const;
         float compute_osm_road_prior(float x, float y) const;
@@ -455,6 +463,13 @@ namespace semantic_bki {
         float osm_cm_[13][N_OSM_PRIOR_COLS]{};  // confusion matrix [row][col], max 13 rows
         // For each confusion matrix row, list of raw label IDs (SemanticKITTI) that map to it
         std::vector<std::vector<int>> osm_cm_row_to_labels_;
+
+        // OSM height filter: scale priors by z within mean ± k*std per OSM category
+        bool use_osm_height_filter_{false};
+        float osm_height_std_multiplier_{2.0f};
+        float osm_height_mean_[7]{};   // roads, parking, grasslands, trees, buildings, fences, stairs
+        float osm_height_std_[7]{};    // std per category; 0 = no valid stats
+        bool osm_height_valid_[7]{};   // true if category has enough points
     };
 
 }

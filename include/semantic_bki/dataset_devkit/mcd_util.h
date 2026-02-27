@@ -125,7 +125,8 @@ class MCDData {
         body_to_lidar_tf_ = Eigen::Matrix4d::Zero();  // Set to zero to detect if not loaded
         original_first_pose_ = Eigen::Matrix4d::Identity();  // Will be set when poses are loaded
         scan_indices_.clear();
-        use_multiclass_ = false;
+        inferred_use_multiclass_ = false;
+        gt_use_multiclass_ = false;
         common_label_config_loaded_ = false;
         use_uncertainty_filter_ = false;
         confusion_matrix_loaded_ = false;
@@ -265,19 +266,39 @@ class MCDData {
       return original_first_pose_;
     }
 
-    /// Enable multiclass inference: read per-class confidence scores and take argmax.
-    void set_multiclass_mode(bool use_mc, const std::string& multiclass_dir) {
-      use_multiclass_ = use_mc;
-      multiclass_dir_ = multiclass_dir;
+    /// Enable multiclass for inferred labels: read per-class confidence scores and take argmax.
+    void set_inferred_multiclass_mode(bool use_mc, const std::string& multiclass_dir) {
+      inferred_use_multiclass_ = use_mc;
+      inferred_multiclass_dir_ = multiclass_dir;
       if (use_mc) {
         RCLCPP_INFO_STREAM(node_->get_logger(),
-            "Multiclass mode enabled. Scores dir: " << multiclass_dir);
+            "Inferred labels multiclass mode enabled. Scores dir: " << multiclass_dir);
       }
     }
 
-    /// Load learning_map_inv from a label config YAML (e.g. labels_semkitti.yaml).
-    /// Returns true on success.
+    /// Enable multiclass for GT labels (e.g. one-hot or per-class scores). Uses gt_label_dir.
+    void set_gt_multiclass_mode(bool use_mc) {
+      gt_use_multiclass_ = use_mc;
+      if (use_mc) {
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "GT labels multiclass mode enabled.");
+      }
+    }
+
+    /// Load learning_map_inv from a label config YAML (e.g. labels_semkitti.yaml) for inferred labels.
     bool load_label_config(const std::string& yaml_path) {
+      return load_learning_map_inv_(yaml_path, learning_map_inv_, "inferred");
+    }
+
+    /// Load learning_map_inv for GT labels (when GT is multiclass from a model).
+    bool load_gt_label_config(const std::string& yaml_path) {
+      return load_learning_map_inv_(yaml_path, gt_learning_map_inv_, "GT");
+    }
+
+  private:
+    bool load_learning_map_inv_(const std::string& yaml_path,
+                                std::map<int, int>& out_map,
+                                const std::string& label) {
       try {
         YAML::Node cfg = YAML::LoadFile(yaml_path);
         if (!cfg["learning_map_inv"]) {
@@ -285,15 +306,15 @@ class MCDData {
               "No 'learning_map_inv' key in " << yaml_path);
           return false;
         }
-        learning_map_inv_.clear();
+        out_map.clear();
         for (auto it = cfg["learning_map_inv"].begin();
              it != cfg["learning_map_inv"].end(); ++it) {
           int class_idx = it->first.as<int>();
           int label_id  = it->second.as<int>();
-          learning_map_inv_[class_idx] = label_id;
+          out_map[class_idx] = label_id;
         }
         RCLCPP_INFO_STREAM(node_->get_logger(),
-            "Loaded learning_map_inv with " << learning_map_inv_.size()
+            "Loaded " << label << " learning_map_inv with " << out_map.size()
             << " entries from " << yaml_path);
         return true;
       } catch (const std::exception& e) {
@@ -302,6 +323,8 @@ class MCDData {
         return false;
       }
     }
+
+  public:
 
     /// Load common taxonomy mappings from labels_common.yaml.
     /// @param yaml_path       Path to labels_common.yaml.
@@ -464,6 +487,12 @@ class MCDData {
     void set_osm_prior_strength(float strength) {
       if (map_) map_->set_osm_prior_strength(strength);
     }
+    void set_osm_height_filter_enabled(bool enabled) {
+      if (map_) map_->set_osm_height_filter_enabled(enabled);
+    }
+    void set_osm_height_std_multiplier(float k) {
+      if (map_) map_->set_osm_height_std_multiplier(k);
+    }
     bool load_osm_confusion_matrix(const std::string &yaml_path) {
       if (!map_) return false;
       try {
@@ -525,8 +554,8 @@ class MCDData {
       std::fclose(fp);
 
       std::string label_name;
-      if (use_multiclass_) {
-        label_name = multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
+      if (inferred_use_multiclass_) {
+        label_name = inferred_multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
       } else {
         label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
       }
@@ -586,8 +615,8 @@ class MCDData {
         std::string scan_name = input_data_dir + "/" + std::string(scan_id_c) + ".bin";
 
         pcl::PointCloud<pcl::PointXYZL>::Ptr cloud;
-        if (use_multiclass_) {
-          std::string mc_name = multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
+        if (inferred_use_multiclass_) {
+          std::string mc_name = inferred_multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
           MulticlassResult mc_result = mcd2pcl_multiclass(scan_name, mc_name);
           cloud = mc_result.cloud;
 
@@ -1039,8 +1068,12 @@ class MCDData {
         std::string scan_name = join_path(input_data_dir, std::string(scan_id_c) + ".bin");
         std::string gt_name = join_path(gt_label_dir_, std::string(scan_id_c) + ".bin");
         std::string result_name = join_path(evaluation_result_dir_, std::string(scan_id_c) + ".txt");
-        
-        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud = mcd2pcl(scan_name, gt_name, /*use_gt_mapping=*/true);
+
+        pcl::PointCloud<pcl::PointXYZL>::Ptr cloud;
+        if (gt_use_multiclass_)
+          cloud = mcd2pcl_gt_multiclass(scan_name, gt_name);
+        else
+          cloud = mcd2pcl(scan_name, gt_name, /*use_gt_mapping=*/true);
         if (cloud->points.empty()) {
           return;
         }
@@ -1114,10 +1147,12 @@ class MCDData {
     Eigen::Matrix4d body_to_lidar_tf_;
     Eigen::Matrix4d original_first_pose_;
 
-    // Multiclass inference settings
-    bool use_multiclass_;
-    std::string multiclass_dir_;
-    std::map<int, int> learning_map_inv_;
+    // Multiclass settings (inferred and GT)
+    bool inferred_use_multiclass_;
+    std::string inferred_multiclass_dir_;
+    std::map<int, int> learning_map_inv_;   // for inferred: model output index → raw label
+    bool gt_use_multiclass_;
+    std::map<int, int> gt_learning_map_inv_;  // for GT: model output index → raw label
 
     // Common taxonomy mappings (loaded from labels_common.yaml)
     bool common_label_config_loaded_;
@@ -1360,6 +1395,86 @@ class MCDData {
       std::fclose(fp);
       pc->width = static_cast<uint32_t>(pc->points.size());
       return result;
+    }
+
+    /// Read GT from multiclass/one-hot format (float16, n_points * n_classes).
+    /// Takes argmax, applies gt_learning_map_inv, then gt_to_common. Returns cloud with labels in common taxonomy.
+    pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl_gt_multiclass(
+        const std::string& fn_scan, const std::string& fn_gt_multiclass) {
+      pcl::PointCloud<pcl::PointXYZL>::Ptr pc(new pcl::PointCloud<pcl::PointXYZL>);
+      FILE* fp = std::fopen(fn_scan.c_str(), "rb");
+      if (!fp) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "Cannot open scan file: " << fn_scan);
+        return pc;
+      }
+      FILE* fp_gt = std::fopen(fn_gt_multiclass.c_str(), "rb");
+      if (!fp_gt) {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "Cannot open GT multiclass file: " << fn_gt_multiclass);
+        std::fclose(fp);
+        return pc;
+      }
+      std::fseek(fp, 0L, SEEK_END);
+      size_t scan_sz = std::ftell(fp);
+      std::rewind(fp);
+      int n_points = static_cast<int>(scan_sz / (sizeof(float) * 4));
+      std::fseek(fp_gt, 0L, SEEK_END);
+      size_t gt_sz = std::ftell(fp_gt);
+      std::rewind(fp_gt);
+      int n_mc = static_cast<int>(gt_sz / sizeof(uint16_t));
+      if (n_points == 0 || n_mc == 0) {
+        std::fclose(fp);
+        std::fclose(fp_gt);
+        return pc;
+      }
+      int n_classes = n_mc / n_points;
+      if (n_mc != n_points * n_classes) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(), "GT multiclass file size mismatch");
+        std::fclose(fp);
+        std::fclose(fp_gt);
+        return pc;
+      }
+      std::vector<uint16_t> mc_raw(static_cast<size_t>(n_mc));
+      if (std::fread(mc_raw.data(), sizeof(uint16_t), n_mc, fp_gt) != static_cast<size_t>(n_mc)) {
+        std::fclose(fp);
+        std::fclose(fp_gt);
+        return pc;
+      }
+      std::fclose(fp_gt);
+      pc->points.reserve(n_points);
+      pc->width = n_points;
+      pc->height = 1;
+      pc->is_dense = false;
+      for (int i = 0; i < n_points; i++) {
+        pcl::PointXYZL point;
+        float intensity;
+        if (std::fread(&point.x, sizeof(float), 1, fp) != 1) break;
+        if (std::fread(&point.y, sizeof(float), 1, fp) != 1) break;
+        if (std::fread(&point.z, sizeof(float), 1, fp) != 1) break;
+        if (std::fread(&intensity, sizeof(float), 1, fp) != 1) break;
+        const uint16_t* row = mc_raw.data() + static_cast<size_t>(i) * n_classes;
+        int best_class = 0;
+        float best_val = half_to_float(row[0]);
+        for (int c = 1; c < n_classes; c++) {
+          float v = half_to_float(row[c]);
+          if (v > best_val) { best_val = v; best_class = c; }
+        }
+        int raw_label = best_class;
+        if (!gt_learning_map_inv_.empty()) {
+          auto it = gt_learning_map_inv_.find(best_class);
+          if (it != gt_learning_map_inv_.end()) raw_label = it->second;
+        }
+        int common_label = raw_label;
+        if (common_label_config_loaded_) {
+          auto it_c = gt_to_common_.find(raw_label);
+          if (it_c != gt_to_common_.end()) common_label = it_c->second;
+          else common_label = 0;
+        }
+        point.label = static_cast<uint32_t>(common_label);
+        pc->points.push_back(point);
+      }
+      std::fclose(fp);
+      pc->width = static_cast<uint32_t>(pc->points.size());
+      return pc;
     }
 
     /// Read GT label file (uint32 per point). Returns empty vector on failure.

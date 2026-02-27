@@ -61,7 +61,7 @@ semkitti_to_common:
   60: 1      # lane-marking → road
   70: 9      # vegetation
   71: 9      # trunk → vegetation
-  72: 4      # terrain → other-ground
+  72: 9      # terrain → vegetation
   80: 7      # pole
   81: 8      # traffic-sign
   99: 12     # other-object
