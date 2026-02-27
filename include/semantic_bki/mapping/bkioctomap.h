@@ -27,7 +27,14 @@ namespace semantic_bki {
     public:
         /// Types used internally
         typedef std::vector<point3f> PointCloud;
-        typedef std::pair<point3f, float> GPPointType;
+        struct GPPointType {
+            point3f first;
+            float second;
+            float weight;
+            GPPointType() : first(), second(0), weight(1.0f) {}
+            GPPointType(const point3f& p, float label, float w = 1.0f)
+                : first(p), second(label), weight(w) {}
+        };
         typedef std::vector<GPPointType> GPPointCloud;
         typedef RTree<GPPointType *, float, 3, float> MyRTree;
 
@@ -88,7 +95,11 @@ namespace semantic_bki {
                                float free_res = 2.0f,
                                float max_range = -1);
 
-        //void insert_training_data(const GPPointCloud &cloud);
+        /// Weighted variant: per-point weights discount uncertain training points
+        /// in the BKI kernel.  point_weights must have the same size as cloud.
+        void insert_pointcloud(const PCLPointCloud &cloud, const point3f &origin, float ds_resolution,
+                               float free_res, float max_range,
+                               const std::vector<float> &point_weights);
 
         /// Get bounding box of the map.
         void get_bbox(point3f &lim_min, point3f &lim_max) const;
@@ -338,7 +349,23 @@ namespace semantic_bki {
         void set_osm_stairs_width(float width_m);
         void set_osm_decay_meters(float decay_m);
 
+        /// OSM confusion matrix: set pre-parsed matrix and label mappings.
+        /// K_pred rows (semantic super-classes) x K_prior cols (OSM categories).
+        /// Column order: [roads, parking, grasslands, trees, buildings, fences, stairs, none].
+        /// Values in [-1, 1]: negative = decrease likelihood, positive = increase.
+        /// "none" column is active (1.0) when no OSM geometry covers the point.
+        /// @param matrix  rows x N_OSM_PRIOR_COLS values, outer index = row
+        /// @param row_to_labels  for each row, list of raw label IDs that map to it
+        void set_osm_confusion_matrix(const std::vector<std::vector<float>> &matrix,
+                                      const std::vector<std::vector<int>> &row_to_labels);
+        void set_osm_prior_strength(float strength);
+
     private:
+        static constexpr int N_OSM_PRIOR_COLS = 8;
+
+        void compute_osm_prior_vec(float x, float y, float osm_vec[N_OSM_PRIOR_COLS]) const;
+
+        void apply_osm_prior_to_ybars(std::vector<float> &ybars, float x, float y, float scale) const;
         /// Compute OSM priors at (x,y): building (polygon), road (polyline), grassland (polygon), tree (polygon + points), parking (polygon), fence (polyline), stairs (polyline with width).
         float compute_osm_building_prior(float x, float y) const;
         float compute_osm_road_prior(float x, float y) const;
@@ -399,6 +426,11 @@ namespace semantic_bki {
         void get_training_data(const PCLPointCloud &cloud, const point3f &origin, float ds_resolution,
                                float free_resolution, float max_range, GPPointCloud &xy) const;
 
+        /// Weighted variant: manual voxel downsampling that preserves per-point weights.
+        void get_training_data(const PCLPointCloud &cloud, const point3f &origin, float ds_resolution,
+                               float free_resolution, float max_range, GPPointCloud &xy,
+                               const std::vector<float> &point_weights) const;
+
         float resolution;
         float block_size;
         unsigned short block_depth;
@@ -415,6 +447,14 @@ namespace semantic_bki {
         std::vector<Geometry2D> osm_stairs_;
         float osm_stairs_width_{1.5f};  // Width (m) for stairs polylines; prior = 1 inside width band, decays outside
         float osm_decay_meters_;
+
+        // OSM confusion matrix for semantic-OSM prior fusion
+        bool osm_cm_loaded_{false};
+        float osm_prior_strength_{0.0f};
+        int osm_cm_rows_{0};      // K_pred (number of semantic super-classes)
+        float osm_cm_[13][N_OSM_PRIOR_COLS]{};  // confusion matrix [row][col], max 13 rows
+        // For each confusion matrix row, list of raw label IDs (SemanticKITTI) that map to it
+        std::vector<std::vector<int>> osm_cm_row_to_labels_;
     };
 
 }

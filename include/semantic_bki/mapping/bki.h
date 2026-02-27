@@ -33,6 +33,17 @@ namespace semantic_bki {
             MatrixXType _x = Eigen::Map<const MatrixXType>(x.data(), x.size() / dim, dim);
             MatrixYType _y = Eigen::Map<const MatrixYType>(y.data(), y.size(), 1);
             this->y_vec = y;
+            this->w_vec.clear();
+            train(_x, _y);
+        }
+
+        void train(const std::vector<T> &x, const std::vector<T> &y, const std::vector<T> &w) {
+            assert(x.size() % dim == 0 && (int) (x.size() / dim) == y.size());
+            assert(w.size() == y.size());
+            MatrixXType _x = Eigen::Map<const MatrixXType>(x.data(), x.size() / dim, dim);
+            MatrixYType _y = Eigen::Map<const MatrixYType>(y.data(), y.size(), 1);
+            this->y_vec = y;
+            this->w_vec = w;
             train(_x, _y);
         }
 
@@ -60,11 +71,12 @@ namespace semantic_bki {
           for (int r = 0; r < _xs.rows(); ++r)
             ybars[r].resize(nc);
 
+            bool has_weights = !w_vec.empty();
             MatrixYType _y_vec = Eigen::Map<const MatrixYType>(y_vec.data(), y_vec.size(), 1);
             for (int k = 0; k < nc; ++k) {
-              for (int i = 0; i < y_vec.size(); ++i) {
+              for (size_t i = 0; i < y_vec.size(); ++i) {
                 if (y_vec[i] == k)
-                  _y_vec(i, 0) = 1;
+                  _y_vec(i, 0) = has_weights ? w_vec[i] : static_cast<T>(1);
                 else
                   _y_vec(i, 0) = 0;
               }
@@ -165,6 +177,7 @@ namespace semantic_bki {
         MatrixXType x;   // temporary storage of training data
         MatrixYType y;   // temporary storage of training labels
         std::vector<T> y_vec;
+        std::vector<T> w_vec;  // per-point weights (empty = all 1.0)
 
         bool trained;    // true if bgkinference stored training data
     };

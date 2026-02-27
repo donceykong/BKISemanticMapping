@@ -34,6 +34,43 @@
 #include "markerarray_pub.h"
 #include "osm_geometry.h"
 
+// ---------------------------------------------------------------------------
+// Common taxonomy (13 classes) — matches Python label_mappings.py
+// ---------------------------------------------------------------------------
+static constexpr int N_COMMON = 13;
+
+static const std::map<int, int>& get_mcd_to_common() {
+  static const std::map<int, int> m = {
+    {0,6},{1,10},{2,5},{3,12},{4,4},{5,12},{6,4},{7,6},
+    {8,12},{9,8},{10,1},{11,0},{12,12},{13,3},{14,12},
+    {15,7},{16,1},{17,5},{18,2},{19,4},{20,12},{21,8},
+    {22,8},{23,12},{24,9},{25,9},{26,11},{27,11},{28,11}
+  };
+  return m;
+}
+
+static const std::map<int, int>& get_semkitti_to_common() {
+  static const std::map<int, int> m = {
+    {0,0},{1,0},{10,11},{11,10},{13,11},{15,10},{16,11},
+    {18,11},{20,11},{30,12},{31,12},{32,12},{40,1},{44,3},
+    {48,2},{49,4},{50,5},{51,6},{52,12},{60,1},{70,9},
+    {71,9},{72,4},{80,7},{81,8},{99,12},{252,11},{253,12},
+    {254,12},{255,12},{256,11},{257,11},{258,11},{259,11}
+  };
+  return m;
+}
+
+static int raw_to_common(int raw_label, const std::map<int, int>& mapping) {
+  auto it = mapping.find(raw_label);
+  return (it != mapping.end()) ? it->second : 0;
+}
+
+struct MulticlassResult {
+  pcl::PointCloud<pcl::PointXYZL>::Ptr cloud;
+  std::vector<float> variances;
+  int n_classes = 0;
+};
+
 /// Convert IEEE 754 half-precision (uint16) to single-precision float.
 static inline float half_to_float(uint16_t h) {
     uint32_t sign     = (static_cast<uint32_t>(h) & 0x8000u) << 16;
@@ -115,6 +152,15 @@ class MCDData {
         original_first_pose_ = Eigen::Matrix4d::Identity();  // Will be set when poses are loaded
         scan_indices_.clear();
         use_multiclass_ = false;
+        use_uncertainty_filter_ = false;
+        confusion_matrix_loaded_ = false;
+        uncertainty_filter_mode_ = "confusion_matrix";
+        uncertainty_drop_percent_ = 10.0f;
+        uncertainty_min_weight_ = 0.1f;
+        total_points_processed_ = 0;
+        total_points_filtered_ = 0;
+        std::memset(confusion_matrix_, 0, sizeof(confusion_matrix_));
+        std::memset(class_precision_, 0, sizeof(class_precision_));
         RCLCPP_WARN_STREAM(node_->get_logger(), "CHECKPOINT: MCDData constructor completed");
       }
 
@@ -282,6 +328,78 @@ class MCDData {
       }
     }
 
+    void set_uncertainty_filter(bool enabled, const std::string& labels_key,
+                               const std::string& mode = "confusion_matrix",
+                               float drop_percent = 10.0f,
+                               float min_weight = 0.1f) {
+      use_uncertainty_filter_ = enabled;
+      inferred_labels_key_ = labels_key;
+      uncertainty_filter_mode_ = mode;
+      uncertainty_drop_percent_ = drop_percent;
+      uncertainty_min_weight_ = min_weight;
+      if (enabled) {
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "Uncertainty filtering enabled (mode=" << mode
+            << ", labels_key=" << labels_key
+            << (mode == "top_percent"
+                ? ", drop_percent=" + std::to_string(drop_percent)
+                  + ", min_weight=" + std::to_string(min_weight)
+                : "")
+            << ")");
+      }
+    }
+
+    /// Load a pre-computed confusion matrix from YAML (rows=predicted, cols=true).
+    /// Computes per-class precision and stores it for filtering.
+    bool load_confusion_matrix(const std::string& yaml_path) {
+      try {
+        YAML::Node root = YAML::LoadFile(yaml_path);
+        if (!root["confusion_matrix"]) {
+          RCLCPP_ERROR_STREAM(node_->get_logger(),
+              "No 'confusion_matrix' key in " << yaml_path);
+          return false;
+        }
+        std::memset(confusion_matrix_, 0, sizeof(confusion_matrix_));
+        auto cm = root["confusion_matrix"];
+        for (auto it = cm.begin(); it != cm.end(); ++it) {
+          int pred_cls = it->first.as<int>();
+          if (pred_cls < 0 || pred_cls >= N_COMMON) continue;
+          auto row = it->second;
+          // Columns are classes 1..12, stored as a sequence of 12 values
+          if (row.size() != 12) {
+            RCLCPP_WARN_STREAM(node_->get_logger(),
+                "Confusion matrix row " << pred_cls << " has " << row.size()
+                << " columns (expected 12), skipping");
+            continue;
+          }
+          for (int c = 0; c < 12; ++c) {
+            confusion_matrix_[pred_cls][c + 1] = row[c].as<int>();
+          }
+        }
+
+        // Compute per-class precision
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "Loaded confusion matrix from " << yaml_path);
+        RCLCPP_INFO_STREAM(node_->get_logger(), "Per-class precision:");
+        for (int cls = 1; cls < N_COMMON; ++cls) {
+          int row_total = 0;
+          for (int c = 0; c < N_COMMON; ++c) row_total += confusion_matrix_[cls][c];
+          float prec = (row_total > 0)
+              ? static_cast<float>(confusion_matrix_[cls][cls]) / row_total
+              : 0.0f;
+          class_precision_[cls] = prec;
+          RCLCPP_INFO_STREAM(node_->get_logger(),
+              "  class " << cls << ": precision=" << (prec * 100.0f) << "%");
+        }
+        confusion_matrix_loaded_ = true;
+        return true;
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR_STREAM(node_->get_logger(),
+            "Failed to load confusion matrix: " << e.what());
+        return false;
+      }
+    }
+
     /// Set map visualization color mode: semantic class or OSM prior (building/road/grassland/tree).
     void set_color_mode(semantic_bki::MapColorMode mode) {
       if (m_pub_) m_pub_->set_color_mode(mode);
@@ -322,6 +440,61 @@ class MCDData {
     }
     void set_osm_decay_meters(float decay_m) {
       if (map_) map_->set_osm_decay_meters(decay_m);
+    }
+    void set_osm_prior_strength(float strength) {
+      if (map_) map_->set_osm_prior_strength(strength);
+    }
+    bool load_osm_confusion_matrix(const std::string &yaml_path) {
+      if (!map_) return false;
+      try {
+        YAML::Node root = YAML::LoadFile(yaml_path);
+        if (!root["confusion_matrix"] || !root["label_to_matrix_idx"])
+          return false;
+
+        auto cm_node = root["confusion_matrix"];
+        auto lm_node = root["label_to_matrix_idx"];
+
+        // Determine row count from label_to_matrix_idx
+        int max_row = -1;
+        for (auto it = lm_node.begin(); it != lm_node.end(); ++it)
+          max_row = std::max(max_row, it->second.as<int>());
+        int n_rows = max_row + 1;
+
+        // Parse confusion matrix rows (keyed by common class ID)
+        // 8 columns: [roads, parking, grasslands, trees, buildings, fences, stairs, none]
+        static constexpr int N_OSM_COLS = 8;
+        std::vector<std::vector<float>> matrix(n_rows, std::vector<float>(N_OSM_COLS, 0.f));
+        for (auto it = cm_node.begin(); it != cm_node.end(); ++it) {
+          int common_class = it->first.as<int>();
+          int row = -1;
+          if (lm_node[common_class]) row = lm_node[common_class].as<int>();
+          if (row < 0 || row >= n_rows) continue;
+          auto vals = it->second;
+          for (int c = 0; c < std::min(static_cast<int>(vals.size()), N_OSM_COLS); ++c)
+            matrix[row][c] = vals[c].as<float>();
+        }
+
+        // Build reverse mapping: for each row, which raw labels map to it
+        const auto &sk_to_common = get_semkitti_to_common();
+        std::vector<std::vector<int>> row_to_labels(n_rows);
+        for (const auto &kv : sk_to_common) {
+          int common_class = kv.second;
+          if (common_class <= 0 || common_class > 12) continue;
+          if (!lm_node[common_class]) continue;
+          int row = lm_node[common_class].as<int>();
+          if (row >= 0 && row < n_rows)
+            row_to_labels[row].push_back(kv.first);
+        }
+
+        map_->set_osm_confusion_matrix(matrix, row_to_labels);
+        RCLCPP_INFO_STREAM(node_->get_logger(),
+            "OSM confusion matrix loaded: " << n_rows << " rows x " << N_OSM_COLS << " cols");
+        return true;
+      } catch (const std::exception &e) {
+        RCLCPP_WARN_STREAM(node_->get_logger(),
+            "Failed to load OSM confusion matrix: " << e.what());
+        return false;
+      }
     }
 
     /// Return true if both the lidar bin and label/multiclass file exist for the given scan file number.
@@ -397,7 +570,103 @@ class MCDData {
         pcl::PointCloud<pcl::PointXYZL>::Ptr cloud;
         if (use_multiclass_) {
           std::string mc_name = multiclass_dir_ + "/" + std::string(scan_id_c) + ".bin";
-          cloud = mcd2pcl_multiclass(scan_name, mc_name);
+          MulticlassResult mc_result = mcd2pcl_multiclass(scan_name, mc_name);
+          cloud = mc_result.cloud;
+
+          // Compute per-point weights from uncertainty for kernel discounting
+          if (use_uncertainty_filter_ && cloud && !cloud->points.empty() &&
+              mc_result.n_classes > 1) {
+
+            float max_var = static_cast<float>(mc_result.n_classes - 1) /
+                            (static_cast<float>(mc_result.n_classes) * mc_result.n_classes);
+            size_t n_pts = cloud->points.size();
+
+            std::vector<float> uncertainties(n_pts);
+            for (size_t pi = 0; pi < n_pts; ++pi) {
+              uncertainties[pi] = 1.0f - std::min(mc_result.variances[pi] / max_var, 1.0f);
+            }
+
+            if (uncertainty_filter_mode_ == "top_percent") {
+              // Discount the top N% most uncertain points via kernel weights.
+              // Points below the threshold get weight 1.0 (full influence).
+              // Points above get weight ramping from 1.0 down to 0.0, so
+              // confident neighbors can dominate through kernel smoothing.
+              float keep_fraction = 1.0f - uncertainty_drop_percent_ / 100.0f;
+              size_t keep_rank = static_cast<size_t>(keep_fraction * n_pts);
+              if (keep_rank >= n_pts) keep_rank = n_pts - 1;
+
+              std::vector<float> sorted_unc(uncertainties);
+              std::nth_element(sorted_unc.begin(),
+                               sorted_unc.begin() + keep_rank,
+                               sorted_unc.end());
+              float threshold = sorted_unc[keep_rank];
+
+              scan_point_weights_.resize(n_pts);
+              int n_discounted = 0;
+              for (size_t pi = 0; pi < n_pts; ++pi) {
+                if (uncertainties[pi] <= threshold) {
+                  scan_point_weights_[pi] = 1.0f;
+                } else {
+                  // Linearly ramp from 1.0 at threshold to uncertainty_min_weight_ at uncertainty=1.0
+                  float denom = (1.0f - threshold);
+                  float t = (denom > 1e-6f)
+                      ? std::min((uncertainties[pi] - threshold) / denom, 1.0f)
+                      : 1.0f;
+                  scan_point_weights_[pi] = 1.0f - t * (1.0f - uncertainty_min_weight_);
+                  n_discounted++;
+                }
+              }
+
+              total_points_processed_ += static_cast<int>(n_pts);
+              total_points_filtered_ += n_discounted;
+              if (n_discounted > 0 && (list_idx < 5 || list_idx % 50 == 0)) {
+                RCLCPP_INFO_STREAM(node_->get_logger(),
+                    "Scan " << list_idx << ": discounted " << n_discounted << "/"
+                    << n_pts << " points (cumulative: "
+                    << total_points_filtered_ << "/" << total_points_processed_ << ")");
+              }
+
+            } else if (confusion_matrix_loaded_) {
+              // Per-class precision: filter (drop) points entirely
+              const auto& inf_common_map = (inferred_labels_key_ == "semkitti")
+                  ? get_semkitti_to_common() : get_mcd_to_common();
+
+              pcl::PointCloud<pcl::PointXYZL>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZL>);
+              filtered->points.reserve(n_pts);
+              int n_dropped = 0;
+
+              for (size_t pi = 0; pi < n_pts; ++pi) {
+                int pred_common = raw_to_common(
+                    static_cast<int>(cloud->points[pi].label), inf_common_map);
+                float precision = (pred_common > 0 && pred_common < N_COMMON)
+                    ? class_precision_[pred_common] : 1.0f;
+                if (uncertainties[pi] <= precision || pred_common == 0) {
+                  filtered->points.push_back(cloud->points[pi]);
+                } else {
+                  n_dropped++;
+                }
+              }
+
+              if (n_dropped > 0) {
+                total_points_processed_ += static_cast<int>(n_pts);
+                total_points_filtered_ += n_dropped;
+                if (list_idx < 5 || list_idx % 50 == 0) {
+                  RCLCPP_INFO_STREAM(node_->get_logger(),
+                      "Scan " << list_idx << ": filtered " << n_dropped << "/"
+                      << n_pts << " points (cumulative: "
+                      << total_points_filtered_ << "/" << total_points_processed_ << ")");
+                }
+              }
+
+              filtered->width = static_cast<uint32_t>(filtered->points.size());
+              filtered->height = 1;
+              filtered->is_dense = false;
+              cloud = filtered;
+              scan_point_weights_.clear();
+            }
+          } else {
+            scan_point_weights_.clear();
+          }
         } else {
           std::string label_name = input_label_dir + "/" + std::string(scan_id_c) + ".bin";
           cloud = mcd2pcl(scan_name, label_name);
@@ -479,7 +748,11 @@ class MCDData {
         origin.z() = transform(2, 3);
         
         try {
-          map_->insert_pointcloud(*cloud, origin, ds_resolution_, free_resolution_, max_range_);
+          if (!scan_point_weights_.empty() && scan_point_weights_.size() == cloud->points.size()) {
+            map_->insert_pointcloud(*cloud, origin, ds_resolution_, free_resolution_, max_range_, scan_point_weights_);
+          } else {
+            map_->insert_pointcloud(*cloud, origin, ds_resolution_, free_resolution_, max_range_);
+          }
         } catch (const std::exception& e) {
           RCLCPP_WARN_STREAM(node_->get_logger(), "WARNING: Exception during insert_pointcloud: " << e.what());
           continue;
@@ -831,6 +1104,19 @@ class MCDData {
     std::string multiclass_dir_;
     std::map<int, int> learning_map_inv_;
 
+    // Uncertainty filtering
+    bool use_uncertainty_filter_;
+    bool confusion_matrix_loaded_;
+    std::string inferred_labels_key_;  // "mcd" or "semkitti"
+    std::string uncertainty_filter_mode_;  // "confusion_matrix" or "top_percent"
+    float uncertainty_drop_percent_;       // for top_percent mode: discount this % of most uncertain points
+    float uncertainty_min_weight_;         // minimum kernel weight for the most uncertain points
+    int confusion_matrix_[N_COMMON][N_COMMON];
+    float class_precision_[N_COMMON];
+    int total_points_processed_;
+    int total_points_filtered_;
+    std::vector<float> scan_point_weights_;
+
     pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl(std::string fn, std::string fn_label) {
       // Open scan file
       FILE* fp = std::fopen(fn.c_str(), "rb");
@@ -927,20 +1213,20 @@ class MCDData {
       return pc;
     }
 
-    /// Read lidar scan + multiclass confidence scores (float16), take argmax, apply learning_map_inv.
-    pcl::PointCloud<pcl::PointXYZL>::Ptr mcd2pcl_multiclass(
+    /// Read lidar scan + multiclass confidence scores (float16), take argmax,
+    /// apply learning_map_inv.  Also computes per-point variance of the class
+    /// probability distribution (used for uncertainty filtering).
+    MulticlassResult mcd2pcl_multiclass(
         const std::string& fn, const std::string& fn_multiclass) {
 
-      auto empty = []() {
-        return pcl::PointCloud<pcl::PointXYZL>::Ptr(
-            new pcl::PointCloud<pcl::PointXYZL>);
-      };
+      MulticlassResult result;
+      result.cloud.reset(new pcl::PointCloud<pcl::PointXYZL>);
 
       FILE* fp = std::fopen(fn.c_str(), "rb");
       if (!fp) {
         RCLCPP_WARN_STREAM(node_->get_logger(),
             "Cannot open scan file: " << fn);
-        return empty();
+        return result;
       }
 
       FILE* fp_mc = std::fopen(fn_multiclass.c_str(), "rb");
@@ -948,16 +1234,14 @@ class MCDData {
         RCLCPP_WARN_STREAM(node_->get_logger(),
             "Cannot open multiclass file: " << fn_multiclass);
         std::fclose(fp);
-        return empty();
+        return result;
       }
 
-      // Scan: 4 floats per point (x, y, z, intensity)
       std::fseek(fp, 0L, SEEK_END);
       size_t scan_sz = std::ftell(fp);
       std::rewind(fp);
       int n_points = static_cast<int>(scan_sz / (sizeof(float) * 4));
 
-      // Multiclass: n_points * n_classes uint16 values (IEEE 754 half-precision)
       std::fseek(fp_mc, 0L, SEEK_END);
       size_t mc_sz = std::ftell(fp_mc);
       std::rewind(fp_mc);
@@ -966,7 +1250,7 @@ class MCDData {
       if (n_points == 0 || n_mc_values == 0) {
         std::fclose(fp);
         std::fclose(fp_mc);
-        return empty();
+        return result;
       }
 
       int n_classes = n_mc_values / n_points;
@@ -976,13 +1260,13 @@ class MCDData {
             << " values for " << n_points << " points (not divisible)");
         std::fclose(fp);
         std::fclose(fp_mc);
-        return empty();
+        return result;
       }
+      result.n_classes = n_classes;
 
       RCLCPP_INFO_STREAM(node_->get_logger(),
           "Multiclass: " << n_points << " points x " << n_classes << " classes");
 
-      // Read all multiclass data at once
       std::vector<uint16_t> mc_raw(n_mc_values);
       if (std::fread(mc_raw.data(), sizeof(uint16_t), n_mc_values, fp_mc)
           != static_cast<size_t>(n_mc_values)) {
@@ -990,18 +1274,16 @@ class MCDData {
             "Failed to read multiclass data from " << fn_multiclass);
         std::fclose(fp);
         std::fclose(fp_mc);
-        return empty();
+        return result;
       }
       std::fclose(fp_mc);
 
-      pcl::PointCloud<pcl::PointXYZL>::Ptr pc(
-          new pcl::PointCloud<pcl::PointXYZL>);
+      auto& pc = result.cloud;
       pc->points.reserve(n_points);
       pc->width = n_points;
       pc->height = 1;
       pc->is_dense = false;
-
-      std::vector<float> row(n_classes);
+      result.variances.reserve(n_points);
 
       for (int i = 0; i < n_points; i++) {
         pcl::PointXYZL point;
@@ -1011,19 +1293,27 @@ class MCDData {
         if (std::fread(&point.z, sizeof(float), 1, fp) != 1) break;
         if (std::fread(&intensity, sizeof(float), 1, fp) != 1) break;
 
-        // Convert float16 row → float32 and find argmax
         const uint16_t* row_ptr = mc_raw.data() + static_cast<size_t>(i) * n_classes;
+
+        // Convert float16 → float32, find argmax, and compute variance
         int best_class = 0;
         float best_val = half_to_float(row_ptr[0]);
+        float sum = best_val;
+        float sum_sq = best_val * best_val;
         for (int c = 1; c < n_classes; c++) {
           float v = half_to_float(row_ptr[c]);
+          sum += v;
+          sum_sq += v * v;
           if (v > best_val) {
             best_val = v;
             best_class = c;
           }
         }
+        float mean = sum / n_classes;
+        float variance = sum_sq / n_classes - mean * mean;
+        if (variance < 0.0f) variance = 0.0f;
+        result.variances.push_back(variance);
 
-        // Map class index → label ID via learning_map_inv
         auto it = learning_map_inv_.find(best_class);
         int label_id = (it != learning_map_inv_.end()) ? it->second : best_class;
 
@@ -1033,6 +1323,24 @@ class MCDData {
 
       std::fclose(fp);
       pc->width = static_cast<uint32_t>(pc->points.size());
-      return pc;
+      return result;
+    }
+
+    /// Read GT label file (uint32 per point). Returns empty vector on failure.
+    std::vector<uint32_t> read_gt_labels(const std::string& dir, int scan_file_num) {
+      char buf[256];
+      std::snprintf(buf, sizeof(buf), "%010d", scan_file_num);
+      std::string path = dir + "/" + std::string(buf) + ".bin";
+      FILE* fp = std::fopen(path.c_str(), "rb");
+      if (!fp) return {};
+      std::fseek(fp, 0L, SEEK_END);
+      size_t sz = std::ftell(fp);
+      std::rewind(fp);
+      int n = static_cast<int>(sz / sizeof(uint32_t));
+      std::vector<uint32_t> labels(n);
+      if (std::fread(labels.data(), sizeof(uint32_t), n, fp) != static_cast<size_t>(n))
+        labels.clear();
+      std::fclose(fp);
+      return labels;
     }
 };

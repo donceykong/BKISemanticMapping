@@ -6,20 +6,20 @@
     resolution: 0.5
     # num_class = number of classes AND valid label index range [0, num_class-1]. Must be >= max_label_id + 1.
     # Semantic KITTI labels (0,1,10,11,...,99) -> use 100. MCD 0-21 -> use 22.
-    num_class: 100
+    num_class: 300
 
     # Sampling resolutions
-    free_resolution: 200.0  # Free space sampling resolution
-    ds_resolution: 0.5      # Downsampling factor
+    free_resolution: 100.0  # Free space sampling resolution
+    ds_resolution: 0.5      # Voxel DS size for pointcloud (before insertion)
 
     # Information about range-finder data
     scan_num: 10000   # How many scans to use
     max_range: 200.0  # Sensor max range (m)
-    skip_frames: 1   # Number of frames to skip between insertions (0 = process every frame, 1 = process every other frame, etc.)
+    skip_frames: 50   # Number of frames to skip between insertions (0 = process every frame, 1 = process every other frame, etc.)
 
     # Dataset information
     input_data_prefix: kth_day_09/lidar_bin/data
-    input_label_prefix: kth_day_09/gt_labels
+    input_label_prefix: kth_day_09/inferred_labels/cenet_mcd/multiclass_confidence_scores
     lidar_pose_file: kth_day_09/pose_inW.csv
     gt_label_prefix: kth_day_09/gt_labels
     evaluation_result_prefix: evaluations/
@@ -30,6 +30,16 @@
     use_multiclass: true
     multiclass_prefix: kth_day_09/inferred_labels/cenet_mcd/multiclass_confidence_scores
     label_config: labels_mcd.yaml
+
+    # Uncertainty filtering: build running confusion matrix from GT labels,
+    # compute per-class precision, drop uncertain points for low-precision classes.
+    use_uncertainty_filter: false
+    inferred_labels_key: mcd  # "mcd" or "semkitti" — determines common taxonomy mapping for inferred labels
+    # Filter mode: "confusion_matrix" (per-class precision threshold) or "top_percent" (drop top N% most uncertain)
+    uncertainty_filter_mode: top_percent
+    uncertainty_drop_percent: 100.0  # for top_percent mode: discount this % of most uncertain points per scan
+    uncertainty_min_weight: 0.05     # minimum kernel weight for the most uncertain points (0.0 = no influence, 1.0 = no discounting)
+    confusion_matrix_file: confusion_matrix_mcd.yaml  # for confusion_matrix mode
 
     # Visualization: show OSM priors colored (blend of building/road/grassland/tree). Use semantic for class colors.
     # Options: semantic, osm_building, osm_road, osm_grassland, osm_tree, osm_parking, osm_fence, osm_blend (all priors blended)
@@ -52,4 +62,10 @@
     # osm_origin_lon: 18.073204280
 
     # Tree points (natural=tree nodes): prior projected as 2D circles with this radius (meters). Same as osm_visualizer tree_point_radius_meters.
-    osm_tree_point_radius_meters: 5.0
+    osm_tree_point_radius_meters: 3.0 # m, 9.84 ft
+
+    # OSM confusion matrix: semantic-OSM prior fusion.
+    # Adds OSM-based bias to every BKI observation, maintaining constant influence.
+    # Maps predicted semantic classes to OSM prior categories to bias predictions toward OSM-compatible classes.
+    osm_confusion_matrix_file: osm_confusion_matrix.yaml
+    osm_prior_strength: 0.0  # fraction of OSM influence per observation (0.0 = disabled)

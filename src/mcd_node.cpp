@@ -88,6 +88,14 @@ int main(int argc, char **argv) {
     node->declare_parameter<bool>("use_multiclass", false);
     node->declare_parameter<std::string>("multiclass_prefix", "");
     node->declare_parameter<std::string>("label_config", "");
+    node->declare_parameter<bool>("use_uncertainty_filter", false);
+    node->declare_parameter<std::string>("inferred_labels_key", "mcd");
+    node->declare_parameter<std::string>("confusion_matrix_file", "");
+    node->declare_parameter<std::string>("uncertainty_filter_mode", "confusion_matrix");
+    node->declare_parameter<double>("uncertainty_drop_percent", 10.0);
+    node->declare_parameter<double>("uncertainty_min_weight", 0.1);
+    node->declare_parameter<std::string>("osm_confusion_matrix_file", "");
+    node->declare_parameter<double>("osm_prior_strength", 0.0);
 
     // Get parameters
     node->get_parameter<std::string>("map_topic", map_topic);
@@ -222,7 +230,6 @@ int main(int argc, char **argv) {
       mcd_data.set_multiclass_mode(true, multiclass_dir);
 
       if (!label_config.empty()) {
-        // dir is <pkg_root>/data/<dataset>; derive config path from the same root
         std::string label_config_path;
         size_t data_pos = dir.rfind("/data/");
         if (data_pos != std::string::npos) {
@@ -240,6 +247,35 @@ int main(int argc, char **argv) {
         RCLCPP_WARN_STREAM(node->get_logger(),
             "use_multiclass=true but no label_config set. "
             "Argmax class indices will be used as-is (no learning_map_inv).");
+      }
+
+      bool use_uncertainty_filter = false;
+      std::string inferred_labels_key, confusion_matrix_file, uncertainty_filter_mode;
+      double uncertainty_drop_percent, uncertainty_min_weight;
+      node->get_parameter<bool>("use_uncertainty_filter", use_uncertainty_filter);
+      node->get_parameter<std::string>("inferred_labels_key", inferred_labels_key);
+      node->get_parameter<std::string>("confusion_matrix_file", confusion_matrix_file);
+      node->get_parameter<std::string>("uncertainty_filter_mode", uncertainty_filter_mode);
+      node->get_parameter<double>("uncertainty_drop_percent", uncertainty_drop_percent);
+      node->get_parameter<double>("uncertainty_min_weight", uncertainty_min_weight);
+      mcd_data.set_uncertainty_filter(use_uncertainty_filter, inferred_labels_key,
+                                      uncertainty_filter_mode,
+                                      static_cast<float>(uncertainty_drop_percent),
+                                      static_cast<float>(uncertainty_min_weight));
+
+      if (use_uncertainty_filter && !confusion_matrix_file.empty()) {
+        std::string cm_path;
+        size_t data_pos = dir.rfind("/data/");
+        if (data_pos != std::string::npos) {
+          cm_path = dir.substr(0, data_pos) + "/config/datasets/" + confusion_matrix_file;
+        } else {
+          cm_path = confusion_matrix_file;
+        }
+        if (!mcd_data.load_confusion_matrix(cm_path)) {
+          RCLCPP_WARN_STREAM(node->get_logger(),
+              "Failed to load confusion matrix from " << cm_path
+              << ". Uncertainty filtering will be disabled.");
+        }
       }
     }
 
@@ -323,6 +359,32 @@ int main(int argc, char **argv) {
             << osm_vis.getTreePoints().size() << " tree points (decay=" << osm_decay_meters << " m)");
       } else {
         RCLCPP_WARN_STREAM(node->get_logger(), "Failed to load OSM file for priors: " << full_osm_path);
+      }
+    }
+
+    // OSM confusion matrix for semantic-OSM prior fusion
+    {
+      std::string osm_cm_file;
+      double osm_prior_str;
+      node->get_parameter<std::string>("osm_confusion_matrix_file", osm_cm_file);
+      node->get_parameter<double>("osm_prior_strength", osm_prior_str);
+      mcd_data.set_osm_prior_strength(static_cast<float>(osm_prior_str));
+      if (!osm_cm_file.empty() && osm_prior_str > 0.0) {
+        std::string cm_path;
+        size_t data_pos = dir.rfind("/data/");
+        if (data_pos != std::string::npos) {
+          cm_path = dir.substr(0, data_pos) + "/config/datasets/" + osm_cm_file;
+        } else {
+          cm_path = osm_cm_file;
+        }
+        if (mcd_data.load_osm_confusion_matrix(cm_path)) {
+          RCLCPP_INFO_STREAM(node->get_logger(),
+              "Loaded OSM confusion matrix from " << cm_path
+              << " (strength=" << osm_prior_str << ")");
+        } else {
+          RCLCPP_WARN_STREAM(node->get_logger(),
+              "Failed to load OSM confusion matrix from " << cm_path);
+        }
       }
     }
 

@@ -89,11 +89,15 @@ def launch_setup(context):
     osm_origin_lon = context.launch_configurations.get('osm_origin_lon', '0.0')
     osm_decay_meters = context.launch_configurations.get('osm_decay_meters', '2.0')
     
-    # Resolve source directory from the install path so data is read from src/
-    # install/<pkg>/share/<pkg> -> workspace root -> src/BKISemanticMapping
+    # Resolve the source package directory so data/config are read from src/,
+    # not from the installed share directory.
+    # Primary: navigate from install share dir up to workspace root.
+    # Fallback: use this file's location (works when running directly from src/).
     pkg_share_dir = get_package_share_directory('semantic_bki')
     ws_root = os.path.abspath(os.path.join(pkg_share_dir, '..', '..', '..', '..'))
     pkg_src_dir = os.path.join(ws_root, 'src', 'BKISemanticMapping')
+    if not os.path.isdir(os.path.join(pkg_src_dir, 'config')):
+        pkg_src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     
     method_config_path = os.path.join(pkg_src_dir, 'config', 'methods', f'{method}.yaml')
     data_config_path = os.path.join(pkg_src_dir, 'config', 'datasets', f'{dataset}.yaml')

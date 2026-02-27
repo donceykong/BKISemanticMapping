@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstring>
 #include <pcl/filters/voxel_grid.h>
 
 #include "bkioctomap.h"
@@ -203,10 +204,13 @@ namespace semantic_bki {
             int j = 0;
             for (auto leaf_it = block->begin_leaf(); leaf_it != block->end_leaf(); ++leaf_it, ++j) {
                 SemanticOcTreeNode &node = leaf_it.get_node();
-
-                // Only need to update if kernel density total kernel density est > 0
-                node.update(ybars[j]);
                 point3f loc = block->get_loc(leaf_it);
+
+                float ybar_sum = 0.f;
+                for (auto v : ybars[j]) ybar_sum += std::abs(v);
+                apply_osm_prior_to_ybars(ybars[j], loc.x(), loc.y(), std::min(ybar_sum, 1.0f));
+
+                node.update(ybars[j]);
                 node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
                 node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
                 node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
@@ -271,6 +275,70 @@ namespace semantic_bki {
 
     void SemanticBKIOctoMap::set_osm_decay_meters(float decay_m) {
         osm_decay_meters_ = decay_m;
+    }
+
+    void SemanticBKIOctoMap::set_osm_prior_strength(float strength) {
+        osm_prior_strength_ = strength;
+    }
+
+    void SemanticBKIOctoMap::set_osm_confusion_matrix(
+            const std::vector<std::vector<float>> &matrix,
+            const std::vector<std::vector<int>> &row_to_labels) {
+        osm_cm_rows_ = std::min(static_cast<int>(matrix.size()), 13);
+        std::memset(osm_cm_, 0, sizeof(osm_cm_));
+        for (int r = 0; r < osm_cm_rows_; ++r) {
+            int ncols = std::min(static_cast<int>(matrix[r].size()), N_OSM_PRIOR_COLS);
+            for (int c = 0; c < ncols; ++c)
+                osm_cm_[r][c] = matrix[r][c];
+        }
+        osm_cm_row_to_labels_ = row_to_labels;
+        osm_cm_row_to_labels_.resize(osm_cm_rows_);
+        osm_cm_loaded_ = true;
+    }
+
+    void SemanticBKIOctoMap::compute_osm_prior_vec(float x, float y,
+                                                    float osm_vec[N_OSM_PRIOR_COLS]) const {
+        osm_vec[0] = compute_osm_road_prior(x, y);
+        osm_vec[1] = compute_osm_parking_prior(x, y);
+        osm_vec[2] = compute_osm_grassland_prior(x, y);
+        osm_vec[3] = compute_osm_tree_prior(x, y);
+        osm_vec[4] = compute_osm_building_prior(x, y);
+        osm_vec[5] = compute_osm_fence_prior(x, y);
+        osm_vec[6] = compute_osm_stairs_prior(x, y);
+        // "none" = 1 when no OSM geometry covers this point, 0 when fully covered
+        float max_geom = 0.f;
+        for (int c = 0; c < 7; ++c)
+            if (osm_vec[c] > max_geom) max_geom = osm_vec[c];
+        osm_vec[7] = 1.0f - max_geom;
+    }
+
+    void SemanticBKIOctoMap::apply_osm_prior_to_ybars(std::vector<float> &ybars,
+                                                      float x, float y, float scale) const {
+        if (!osm_cm_loaded_ || osm_prior_strength_ <= 0.0f || scale <= 0.0f) return;
+
+        float osm_vec[N_OSM_PRIOR_COLS];
+        compute_osm_prior_vec(x, y, osm_vec);
+
+        // p_super[row] = sum_j(M[row][j] * osm_vec[j])
+        // M values in [-1, 1]; negative decreases likelihood, positive increases.
+        std::vector<float> p_super(osm_cm_rows_, 0.f);
+        for (int r = 0; r < osm_cm_rows_; ++r)
+            for (int c = 0; c < N_OSM_PRIOR_COLS; ++c)
+                p_super[r] += osm_cm_[r][c] * osm_vec[c];
+
+        // Add OSM contribution directly to ybars so it accumulates with every
+        // observation, maintaining a constant proportion of the total evidence.
+        float effective = osm_prior_strength_ * scale;
+        int num_class = static_cast<int>(ybars.size());
+        for (int r = 0; r < osm_cm_rows_; ++r) {
+            const auto &labels = osm_cm_row_to_labels_[r];
+            if (labels.empty() || p_super[r] == 0.f) continue;
+            float share = effective * p_super[r] / static_cast<float>(labels.size());
+            for (int lbl : labels) {
+                if (lbl >= 0 && lbl < num_class)
+                    ybars[lbl] += share;
+            }
+        }
     }
 
     float SemanticBKIOctoMap::compute_osm_building_prior(float x, float y) const {
@@ -545,10 +613,13 @@ namespace semantic_bki {
                 int j = 0;
                 for (auto leaf_it = block->begin_leaf(); leaf_it != block->end_leaf(); ++leaf_it, ++j) {
                     SemanticOcTreeNode &node = leaf_it.get_node();
-                    // Only need to update if kernel density total kernel density est > 0
-                    //if (kbar[j] > 0.0)
-                    node.update(ybars[j]);
                     point3f loc = block->get_loc(leaf_it);
+
+                    float ybar_sum = 0.f;
+                    for (auto v : ybars[j]) ybar_sum += std::abs(v);
+                    apply_osm_prior_to_ybars(ybars[j], loc.x(), loc.y(), std::min(ybar_sum, 1.0f));
+
+                    node.update(ybars[j]);
                     node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
                     node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
                     node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
@@ -632,6 +703,199 @@ namespace semantic_bki {
         for (auto it = sampled_frees.begin(); it != sampled_frees.end(); ++it) {
             xy.emplace_back(point3f(it->x, it->y, it->z), 0.0f);
         }
+    }
+
+    void SemanticBKIOctoMap::get_training_data(const PCLPointCloud &cloud, const point3f &origin,
+                                      float ds_resolution, float free_resolution, float max_range,
+                                      GPPointCloud &xy, const std::vector<float> &point_weights) const {
+        // Manual voxel downsampling that preserves per-point weights.
+        // For each voxel: centroid position, label from highest-weight point, mean weight.
+        xy.clear();
+
+        struct VoxelData {
+            double sx, sy, sz;
+            uint32_t label;
+            float best_w;
+            double w_sum;
+            int count;
+        };
+
+        float inv_res = (ds_resolution > 0) ? (1.0f / ds_resolution) : 0.0f;
+        auto voxel_key = [inv_res](float x, float y, float z) -> int64_t {
+            int64_t ix = static_cast<int64_t>(std::floor(x * inv_res));
+            int64_t iy = static_cast<int64_t>(std::floor(y * inv_res));
+            int64_t iz = static_cast<int64_t>(std::floor(z * inv_res));
+            return (ix * 73856093) ^ (iy * 19349669) ^ (iz * 83492791);
+        };
+
+        std::unordered_map<int64_t, VoxelData> voxels;
+
+        PCLPointCloud frees;
+        frees.height = 1;
+        frees.width = 0;
+
+        for (size_t i = 0; i < cloud.size(); ++i) {
+            point3f p(cloud[i].x, cloud[i].y, cloud[i].z);
+            if (max_range > 0 && (p - origin).norm() > max_range)
+                continue;
+
+            float w = (i < point_weights.size()) ? point_weights[i] : 1.0f;
+
+            if (ds_resolution > 0) {
+                int64_t key = voxel_key(cloud[i].x, cloud[i].y, cloud[i].z);
+                auto it = voxels.find(key);
+                if (it == voxels.end()) {
+                    voxels[key] = {cloud[i].x, cloud[i].y, cloud[i].z,
+                                   cloud[i].label, w, w, 1};
+                } else {
+                    auto &v = it->second;
+                    v.sx += cloud[i].x; v.sy += cloud[i].y; v.sz += cloud[i].z;
+                    if (w > v.best_w) { v.label = cloud[i].label; v.best_w = w; }
+                    v.w_sum += w;
+                    v.count++;
+                }
+            } else {
+                xy.emplace_back(p, cloud[i].label, w);
+            }
+
+            PointCloud frees_n;
+            beam_sample(p, origin, frees_n, free_resolution);
+            PCLPointType p_origin;
+            p_origin.x = origin.x(); p_origin.y = origin.y(); p_origin.z = origin.z();
+            p_origin.label = 0;
+            frees.push_back(p_origin);
+            for (auto fp = frees_n.begin(); fp != frees_n.end(); ++fp) {
+                PCLPointType pf;
+                pf.x = fp->x(); pf.y = fp->y(); pf.z = fp->z(); pf.label = 0;
+                frees.push_back(pf);
+                frees.width++;
+            }
+        }
+
+        if (ds_resolution > 0) {
+            for (auto &kv : voxels) {
+                auto &v = kv.second;
+                float cx = static_cast<float>(v.sx / v.count);
+                float cy = static_cast<float>(v.sy / v.count);
+                float cz = static_cast<float>(v.sz / v.count);
+                float avg_w = static_cast<float>(v.w_sum / v.count);
+                xy.emplace_back(point3f(cx, cy, cz), v.label, avg_w);
+            }
+        }
+
+        // Free space points always get weight 1.0
+        PCLPointCloud sampled_frees;
+        downsample(frees, sampled_frees, ds_resolution);
+        for (auto it = sampled_frees.begin(); it != sampled_frees.end(); ++it) {
+            xy.emplace_back(point3f(it->x, it->y, it->z), 0.0f, 1.0f);
+        }
+    }
+
+    void SemanticBKIOctoMap::insert_pointcloud(const PCLPointCloud &cloud, const point3f &origin,
+                                      float ds_resolution, float free_res, float max_range,
+                                      const std::vector<float> &point_weights) {
+        GPPointCloud xy;
+        get_training_data(cloud, origin, ds_resolution, free_res, max_range, xy, point_weights);
+
+        if (xy.size() == 0) return;
+
+        point3f lim_min, lim_max;
+        bbox(xy, lim_min, lim_max);
+
+        vector<BlockHashKey> blocks;
+        get_blocks_in_bbox(lim_min, lim_max, blocks);
+
+        for (auto it = xy.cbegin(); it != xy.cend(); ++it) {
+            float p[] = {it->first.x(), it->first.y(), it->first.z()};
+            rtree.Insert(p, p, const_cast<GPPointType *>(&*it));
+        }
+
+        vector<BlockHashKey> test_blocks;
+        std::unordered_map<BlockHashKey, SemanticBKI3f *> bgk_arr;
+#ifdef OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+        for (int i = 0; i < blocks.size(); ++i) {
+            BlockHashKey key = blocks[i];
+            ExtendedBlock eblock = get_extended_block(key);
+            if (has_gp_points_in_bbox(eblock))
+#ifdef OPENMP
+#pragma omp critical
+#endif
+            { test_blocks.push_back(key); };
+
+            GPPointCloud block_xy;
+            get_gp_points_in_bbox(key, block_xy);
+            if (block_xy.size() < 1) continue;
+
+            vector<float> block_x, block_y, block_w;
+            for (auto it = block_xy.cbegin(); it != block_xy.cend(); ++it) {
+                block_x.push_back(it->first.x());
+                block_x.push_back(it->first.y());
+                block_x.push_back(it->first.z());
+                block_y.push_back(it->second);
+                block_w.push_back(it->weight);
+            }
+
+            SemanticBKI3f *bgk = new SemanticBKI3f(SemanticOcTreeNode::num_class, SemanticOcTreeNode::sf2, SemanticOcTreeNode::ell);
+            bgk->train(block_x, block_y, block_w);
+#ifdef OPENMP
+#pragma omp critical
+#endif
+            { bgk_arr.emplace(key, bgk); };
+        }
+
+#ifdef OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+        for (int i = 0; i < test_blocks.size(); ++i) {
+            BlockHashKey key = test_blocks[i];
+#ifdef OPENMP
+#pragma omp critical
+#endif
+            {
+                if (block_arr.find(key) == block_arr.end())
+                    block_arr.emplace(key, new Block(hash_key_to_block(key)));
+            };
+            Block *block = block_arr[key];
+            vector<float> xs;
+            for (auto leaf_it = block->begin_leaf(); leaf_it != block->end_leaf(); ++leaf_it) {
+                point3f p = block->get_loc(leaf_it);
+                xs.push_back(p.x());
+                xs.push_back(p.y());
+                xs.push_back(p.z());
+            }
+
+            ExtendedBlock eblock = block->get_extended_block();
+            for (auto block_it = eblock.cbegin(); block_it != eblock.cend(); ++block_it) {
+                auto bgk = bgk_arr.find(*block_it);
+                if (bgk == bgk_arr.end()) continue;
+                vector<vector<float>> ybars;
+                bgk->second->predict(xs, ybars);
+                int j = 0;
+                for (auto leaf_it = block->begin_leaf(); leaf_it != block->end_leaf(); ++leaf_it, ++j) {
+                    SemanticOcTreeNode &node = leaf_it.get_node();
+                    point3f loc = block->get_loc(leaf_it);
+
+                    float ybar_sum = 0.f;
+                    for (auto v : ybars[j]) ybar_sum += std::abs(v);
+                    apply_osm_prior_to_ybars(ybars[j], loc.x(), loc.y(), std::min(ybar_sum, 1.0f));
+
+                    node.update(ybars[j]);
+                    node.set_osm_building(compute_osm_building_prior(loc.x(), loc.y()));
+                    node.set_osm_road(compute_osm_road_prior(loc.x(), loc.y()));
+                    node.set_osm_grassland(compute_osm_grassland_prior(loc.x(), loc.y()));
+                    node.set_osm_tree(compute_osm_tree_prior(loc.x(), loc.y()));
+                    node.set_osm_parking(compute_osm_parking_prior(loc.x(), loc.y()));
+                    node.set_osm_fence(compute_osm_fence_prior(loc.x(), loc.y()));
+                    node.set_osm_stairs(compute_osm_stairs_prior(loc.x(), loc.y()));
+                }
+            }
+        }
+
+        for (auto it = bgk_arr.begin(); it != bgk_arr.end(); ++it)
+            delete it->second;
+        rtree.RemoveAll();
     }
 
     void SemanticBKIOctoMap::downsample(const PCLPointCloud &in, PCLPointCloud &out, float ds_resolution) const {
