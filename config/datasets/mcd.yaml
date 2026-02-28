@@ -21,7 +21,7 @@
     lidar_pose_file: kth_day_09/pose_inW.csv
     evaluation_result_prefix: evaluations/osm_height_prior_evaluations/
     query: true
-    visualize: false
+    visualize: true
 
     # Multiclass: per-class confidence scores (float16) vs single uint32 per point.
     inferred_use_multiclass: true   # inferred labels from input_label_prefix
@@ -54,7 +54,7 @@
     # OSM prior configuration 
     # --------------------------------
     # OSM prior decay: distance (m) over which prior drops from 1 to 0 away from OSM geometry
-    osm_decay_meters: 2.0
+    osm_decay_meters: 1.0
     # OSM file for voxel priors (path relative to data dir, or absolute). Must match osm_visualizer if using both.
     osm_file: kth.osm
     osm_origin_lat: 59.347671416
@@ -67,9 +67,9 @@
     # Adds OSM-based bias to every BKI observation, maintaining constant influence.
     # Maps predicted semantic classes to OSM prior categories to bias predictions toward OSM-compatible classes.
     osm_confusion_matrix_file: osm_confusion_matrix.yaml
-    osm_prior_strength: 2.0  # fraction of OSM influence per observation (0.0 = disabled)
+    osm_prior_strength: 1.5  # fraction of OSM influence per observation (0.0 = disabled)
 
     # OSM height filter: scale OSM priors by height (z). Per-scan mean and std of z per OSM category
     # are computed; priors apply only when voxel z is within [mean - k*std, mean + k*std].
-    use_osm_height_filter: true  # enable to restrict OSM priors to typical height ranges
+    use_osm_height_filter: false  # enable to restrict OSM priors to typical height ranges
     osm_height_std_multiplier: 2.0  # k for mean ± k*std (e.g. 2.0 = ~95% of points within range)

@@ -27,7 +27,7 @@ confusion_matrix:
   9:  [ 0.50,  0.50,   1.00,  1.00, -0.80,   0.00,  0.00,  0.90]   # vegetation
   10: [ 0.50,  0.80,  -0.50,  0.00,  0.00,   0.00,  0.00,  0.30]   # two-wheeler
   11: [ 0.50,  0.80,  -0.50,  0.00,  0.00,   0.00,  0.00,  0.30]   # vehicle
-  12: [ 0.30,  0.00,   0.50,  0.00,  0.00,   0.10,  0.00,  0.30]   # other-object
+  12: [ 0.10,  0.10,   0.10,  0.10,  0.10,   0.10,  0.10,  0.30]   # other-object
 
 # OSM category to column index in confusion matrix
 osm_class_map:
