@@ -8,8 +8,10 @@
 namespace semantic_bki {
 
     /// 2D polygon (list of (x,y) vertices; same convention as OSMVisualizer).
+    /// Optional holes (inner rings): points inside a hole are considered outside the filled polygon.
     struct Geometry2D {
         std::vector<std::pair<float, float>> coords;
+        std::vector<Geometry2D> holes;  // Inner rings (cutouts); empty = no holes
     };
 
     /// Ray-casting point-in-polygon test (returns true if (px,py) is inside poly).
@@ -43,11 +45,24 @@ namespace semantic_bki {
         return ddx * ddx + ddy * ddy;
     }
 
-    /// Minimum distance from (px,py) to polygon boundary. Returns 0 if inside polygon.
-    inline float distance_to_polygon_boundary(float px, float py, const Geometry2D& poly) {
-        const auto& c = poly.coords;
-        if (c.size() < 2) return std::numeric_limits<float>::max();
-        bool inside = point_in_polygon(px, py, poly);
+    /// Point-in-polygon with holes: inside filled region iff inside outer AND outside all holes.
+    inline bool point_in_polygon_with_holes(float px, float py, const Geometry2D& poly) {
+        if (!point_in_polygon(px, py, poly)) return false;
+        for (const auto& hole : poly.holes) {
+            if (point_in_polygon(px, py, hole)) return false;  // Inside a hole = outside filled
+        }
+        return true;
+    }
+
+    /// Minimum distance from (px,py) to a single ring boundary (used for outer and holes).
+    inline float distance_to_ring_boundary_sq(float px, float py, const Geometry2D& ring, bool* out_inside) {
+        const auto& c = ring.coords;
+        if (c.size() < 2) {
+            if (out_inside) *out_inside = false;
+            return std::numeric_limits<float>::max();
+        }
+        bool inside = point_in_polygon(px, py, ring);
+        if (out_inside) *out_inside = inside;
         float min_d_sq = std::numeric_limits<float>::max();
         int n = static_cast<int>(c.size());
         for (int i = 0, j = n - 1; i < n; j = i++) {
@@ -56,8 +71,42 @@ namespace semantic_bki {
                 c[i].first, c[i].second);
             if (d_sq < min_d_sq) min_d_sq = d_sq;
         }
+        return min_d_sq;
+    }
+
+    /// Minimum distance from (px,py) to polygon boundary. Returns signed distance:
+    /// negative = inside filled region, positive = outside. Supports polygons with holes.
+    inline float distance_to_polygon_boundary(float px, float py, const Geometry2D& poly) {
+        const auto& c = poly.coords;
+        if (c.size() < 2) return std::numeric_limits<float>::max();
+
+        if (poly.holes.empty()) {
+            bool inside = point_in_polygon(px, py, poly);
+            bool dummy;
+            float min_d_sq = distance_to_ring_boundary_sq(px, py, poly, &dummy);
+            float d = std::sqrt(min_d_sq);
+            return inside ? -d : d;
+        }
+
+        // Polygon with holes: boundary = outer ring + all hole rings
+        bool inside_outer = point_in_polygon(px, py, poly);
+        bool inside_any_hole = false;
+        for (const auto& hole : poly.holes) {
+            if (point_in_polygon(px, py, hole)) {
+                inside_any_hole = true;
+                break;
+            }
+        }
+        bool inside_filled = inside_outer && !inside_any_hole;
+
+        float min_d_sq = distance_to_ring_boundary_sq(px, py, poly, nullptr);
+        for (const auto& hole : poly.holes) {
+            bool in_hole;
+            float d_sq = distance_to_ring_boundary_sq(px, py, hole, &in_hole);
+            if (d_sq < min_d_sq) min_d_sq = d_sq;
+        }
         float d = std::sqrt(min_d_sq);
-        return inside ? -d : d;  // negative = inside (signed distance)
+        return inside_filled ? -d : d;
     }
 
     /// Minimum distance from (px,py) to polyline (open path, not closed polygon).

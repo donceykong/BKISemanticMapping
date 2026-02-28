@@ -186,17 +186,6 @@ int main(int argc, char** argv) {
         RCLCPP_INFO(node->get_logger(), "No lidar_pose_file specified. OSM data will use original coordinates and no path will be drawn.");
     }
 
-    // Save PNG visualization
-    std::string png_output = osm_file;
-    size_t last_dot = png_output.find_last_of(".");
-    if (last_dot != std::string::npos) {
-        png_output = png_output.substr(0, last_dot) + "_buildings.png";
-    } else {
-        png_output = png_output + "_buildings.png";
-    }
-    visualizer.saveAsPNG(png_output, 2048, 2048, 50);
-    RCLCPP_INFO_STREAM(node->get_logger(), "Saved OSM visualization PNG to: " << png_output);
-
     visualizer.publish();
     visualizer.startPeriodicPublishing(publish_rate);
     RCLCPP_INFO_STREAM(node->get_logger(), "Publishing OSM markers at " << publish_rate << " Hz");

@@ -7,8 +7,6 @@
 #include <algorithm>
 #include <limits>
 #include <Eigen/Dense>
-#include <opencv2/opencv.hpp>
-#include <opencv2/imgproc.hpp>
 #include <osmium/io/any_input.hpp>
 #include <osmium/handler.hpp>
 #include <osmium/visitor.hpp>
@@ -24,6 +22,31 @@
 #include <osmium/tags/tags_filter.hpp>
 
 namespace {
+
+    /// Add polygon outline (outer ring + holes) as line segments to marker.
+    void addPolygonOutlineToMarker(const semantic_bki::Geometry2D& poly,
+                                   visualization_msgs::msg::Marker& marker) {
+        auto addRing = [&](const std::vector<std::pair<float, float>>& coords) {
+            if (coords.size() < 2) return;
+            for (size_t i = 0; i < coords.size(); ++i) {
+                size_t next = (i + 1) % coords.size();
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = coords[i].first;
+                p1.y = coords[i].second;
+                p1.z = 0.0;
+                p2.x = coords[next].first;
+                p2.y = coords[next].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        };
+        addRing(poly.coords);
+        for (const auto& hole : poly.holes) {
+            addRing(hole.coords);
+        }
+    }
+
     // Handler class for extracting buildings, roads, sidewalks, grasslands, trees, forests (ways + nodes + multipolygons) from OSM data using libosmium
     class OSMGeometryHandler : public osmium::handler::Handler {
     public:
@@ -196,40 +219,47 @@ namespace {
             }
         }
 
+        /// Helper: extract outer + inner rings from area into polygons with holes, push to container.
+        void push_area_with_holes(const osmium::Area& area, std::vector<semantic_bki::Geometry2D>& container) {
+            for (const auto& outer_ring : area.outer_rings()) {
+                semantic_bki::Geometry2D geom;
+                for (const auto& node_ref : outer_ring) {
+                    const osmium::Location& location = node_ref.location();
+                    if (location.valid()) {
+                        geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
+                    }
+                }
+                for (const auto& inner_ring : area.inner_rings(outer_ring)) {
+                    semantic_bki::Geometry2D hole;
+                    for (const auto& node_ref : inner_ring) {
+                        const osmium::Location& location = node_ref.location();
+                        if (location.valid()) {
+                            hole.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
+                        }
+                    }
+                    if (hole.coords.size() >= 3) {
+                        geom.holes.push_back(std::move(hole));
+                    }
+                }
+                if (geom.coords.size() >= 3) {
+                    container.push_back(std::move(geom));
+                }
+            }
+        }
+
         // Handle areas (from multipolygons or closed ways) - called by MultipolygonManager
         void area(const osmium::Area& area) {
             // Check for parking areas (amenity=parking as multipolygon)
             const char* amenity_tag = area.tags()["amenity"];
             if (amenity_tag && std::string(amenity_tag) == "parking") {
-                for (const auto& outer_ring : area.outer_rings()) {
-                    semantic_bki::Geometry2D geom;
-                    for (const auto& node_ref : outer_ring) {
-                        const osmium::Location& location = node_ref.location();
-                        if (location.valid()) {
-                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                        }
-                    }
-                    if (geom.coords.size() >= 3) parking_.push_back(geom);
-                }
+                push_area_with_holes(area, parking_);
                 return;
             }
 
             // Check tags to determine type
             const char* building_tag = area.tags()["building"];
             if (building_tag) {
-                // Extract outer rings as separate polygons (each outer ring is a building)
-                for (const auto& outer_ring : area.outer_rings()) {
-                    semantic_bki::Geometry2D geom;
-                    for (const auto& node_ref : outer_ring) {
-                        const osmium::Location& location = node_ref.location();
-                        if (location.valid()) {
-                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                        }
-                    }
-                    if (geom.coords.size() >= 3) {
-                        buildings_.push_back(geom);
-                    }
-                }
+                push_area_with_holes(area, buildings_);
                 return;
             }
 
@@ -239,48 +269,15 @@ namespace {
                 std::string landuse(landuse_tag);
                 if (landuse == "grass" || landuse == "meadow" || landuse == "greenfield" ||
                     landuse == "recreation_ground") {
-                    for (const auto& outer_ring : area.outer_rings()) {
-                        semantic_bki::Geometry2D geom;
-                        for (const auto& node_ref : outer_ring) {
-                            const osmium::Location& location = node_ref.location();
-                            if (location.valid()) {
-                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                            }
-                        }
-                        if (geom.coords.size() >= 3) {
-                            grasslands_.push_back(geom);
-                        }
-                    }
+                    push_area_with_holes(area, grasslands_);
                     return;
                 }
                 if (landuse == "orchard" || landuse == "vineyard") {
-                    for (const auto& outer_ring : area.outer_rings()) {
-                        semantic_bki::Geometry2D geom;
-                        for (const auto& node_ref : outer_ring) {
-                            const osmium::Location& location = node_ref.location();
-                            if (location.valid()) {
-                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                            }
-                        }
-                        if (geom.coords.size() >= 3) {
-                            trees_.push_back(geom);
-                        }
-                    }
+                    push_area_with_holes(area, trees_);
                     return;
                 }
                 if (landuse == "forest") {
-                    for (const auto& outer_ring : area.outer_rings()) {
-                        semantic_bki::Geometry2D geom;
-                        for (const auto& node_ref : outer_ring) {
-                            const osmium::Location& location = node_ref.location();
-                            if (location.valid()) {
-                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                            }
-                        }
-                        if (geom.coords.size() >= 3) {
-                            forests_.push_back(geom);
-                        }
-                    }
+                    push_area_with_holes(area, forests_);
                     return;
                 }
             }
@@ -290,18 +287,7 @@ namespace {
             if (leisure_tag) {
                 std::string leisure(leisure_tag);
                 if (leisure == "park" || leisure == "garden") {
-                    for (const auto& outer_ring : area.outer_rings()) {
-                        semantic_bki::Geometry2D geom;
-                        for (const auto& node_ref : outer_ring) {
-                            const osmium::Location& location = node_ref.location();
-                            if (location.valid()) {
-                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                            }
-                        }
-                        if (geom.coords.size() >= 3) {
-                            grasslands_.push_back(geom);
-                        }
-                    }
+                    push_area_with_holes(area, grasslands_);
                     return;
                 }
             }
@@ -311,51 +297,18 @@ namespace {
             if (natural_tag) {
                 std::string natural(natural_tag);
                 if (natural == "wood" || natural == "forest") {
-                    for (const auto& outer_ring : area.outer_rings()) {
-                        semantic_bki::Geometry2D geom;
-                        for (const auto& node_ref : outer_ring) {
-                            const osmium::Location& location = node_ref.location();
-                            if (location.valid()) {
-                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                            }
-                        }
-                        if (geom.coords.size() >= 3) {
-                            forests_.push_back(geom);
-                        }
-                    }
+                    push_area_with_holes(area, forests_);
                     return;
                 }
             }
             if (landuse_tag && std::string(landuse_tag) == "forest") {
-                for (const auto& outer_ring : area.outer_rings()) {
-                    semantic_bki::Geometry2D geom;
-                    for (const auto& node_ref : outer_ring) {
-                        const osmium::Location& location = node_ref.location();
-                        if (location.valid()) {
-                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                        }
-                    }
-                    if (geom.coords.size() >= 3) {
-                        forests_.push_back(geom);
-                    }
-                }
+                push_area_with_holes(area, forests_);
                 return;
             }
             // landcover=trees (tree-covered areas, multipolygons) -> trees_
             const char* landcover_tag = area.tags()["landcover"];
             if (landcover_tag && std::string(landcover_tag) == "trees") {
-                for (const auto& outer_ring : area.outer_rings()) {
-                    semantic_bki::Geometry2D geom;
-                    for (const auto& node_ref : outer_ring) {
-                        const osmium::Location& location = node_ref.location();
-                        if (location.valid()) {
-                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
-                        }
-                    }
-                    if (geom.coords.size() >= 3) {
-                        trees_.push_back(geom);
-                    }
-                }
+                push_area_with_holes(area, trees_);
             }
         }
 
@@ -517,39 +470,27 @@ namespace semantic_bki {
         marker.color.a = 1.0; // Fully opaque blue lines
 
         for (const auto& building : buildings) {
-            if (building.coords.size() < 2) continue; // Need at least 2 points for a line
-            
-            // Check for NaN or invalid coordinates and skip if found
+            if (building.coords.size() < 2) continue;
             bool has_invalid = false;
             for (const auto& coord : building.coords) {
-                if (std::isnan(coord.first) || std::isnan(coord.second) || 
+                if (std::isnan(coord.first) || std::isnan(coord.second) ||
                     std::isinf(coord.first) || std::isinf(coord.second)) {
                     has_invalid = true;
                     break;
                 }
             }
-            if (has_invalid) {
-                // RCLCPP_WARN_STREAM(node_->get_logger(), "Skipping building polygon with invalid (NaN/Inf) coordinates");
-                continue;
+            for (const auto& hole : building.holes) {
+                for (const auto& coord : hole.coords) {
+                    if (std::isnan(coord.first) || std::isnan(coord.second) ||
+                        std::isinf(coord.first) || std::isinf(coord.second)) {
+                        has_invalid = true;
+                        break;
+                    }
+                }
+                if (has_invalid) break;
             }
-            
-            // Draw closed polygon outline by connecting consecutive points
-            for (size_t i = 0; i < building.coords.size(); ++i) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = building.coords[i].first;
-                p1.y = building.coords[i].second;
-                p1.z = 0.0;
-                
-                // Connect to next point (wrap around for closed polygon)
-                size_t next_idx = (i + 1) % building.coords.size();
-                p2.x = building.coords[next_idx].first;
-                p2.y = building.coords[next_idx].second;
-                p2.z = 0.0;
-                
-                // Add line segment: p1 -> p2
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
-            }
+            if (has_invalid) continue;
+            addPolygonOutlineToMarker(building, marker);
         }
 
         return marker;
@@ -673,20 +614,18 @@ namespace semantic_bki {
                     break;
                 }
             }
-            if (has_invalid) continue;
-            // Draw closed polygon outline (like buildings) or polyline
-            for (size_t i = 0; i < park.coords.size(); ++i) {
-                size_t next_idx = (i + 1) % park.coords.size();
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = park.coords[i].first;
-                p1.y = park.coords[i].second;
-                p1.z = 0.0;
-                p2.x = park.coords[next_idx].first;
-                p2.y = park.coords[next_idx].second;
-                p2.z = 0.0;
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
+            for (const auto& hole : park.holes) {
+                for (const auto& coord : hole.coords) {
+                    if (std::isnan(coord.first) || std::isnan(coord.second) ||
+                        std::isinf(coord.first) || std::isinf(coord.second)) {
+                        has_invalid = true;
+                        break;
+                    }
+                }
+                if (has_invalid) break;
             }
+            if (has_invalid) continue;
+            addPolygonOutlineToMarker(park, marker);
         }
         return marker;
     }
@@ -846,19 +785,17 @@ namespace semantic_bki {
                     break;
                 }
             }
-            if (has_invalid) continue;
-            for (size_t i = 0; i < grassland.coords.size(); ++i) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = grassland.coords[i].first;
-                p1.y = grassland.coords[i].second;
-                p1.z = 0.0;
-                size_t next_idx = (i + 1) % grassland.coords.size();
-                p2.x = grassland.coords[next_idx].first;
-                p2.y = grassland.coords[next_idx].second;
-                p2.z = 0.0;
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
+            for (const auto& hole : grassland.holes) {
+                for (const auto& coord : hole.coords) {
+                    if (std::isnan(coord.first) || std::isnan(coord.second) || std::isinf(coord.first) || std::isinf(coord.second)) {
+                        has_invalid = true;
+                        break;
+                    }
+                }
+                if (has_invalid) break;
             }
+            if (has_invalid) continue;
+            addPolygonOutlineToMarker(grassland, marker);
         }
         return marker;
     }
@@ -887,19 +824,17 @@ namespace semantic_bki {
                     break;
                 }
             }
-            if (has_invalid) continue;
-            for (size_t i = 0; i < forest.coords.size(); ++i) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = forest.coords[i].first;
-                p1.y = forest.coords[i].second;
-                p1.z = 0.0;
-                size_t next_idx = (i + 1) % forest.coords.size();
-                p2.x = forest.coords[next_idx].first;
-                p2.y = forest.coords[next_idx].second;
-                p2.z = 0.0;
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
+            for (const auto& hole : forest.holes) {
+                for (const auto& coord : hole.coords) {
+                    if (std::isnan(coord.first) || std::isnan(coord.second) || std::isinf(coord.first) || std::isinf(coord.second)) {
+                        has_invalid = true;
+                        break;
+                    }
+                }
+                if (has_invalid) break;
             }
+            if (has_invalid) continue;
+            addPolygonOutlineToMarker(forest, marker);
         }
         return marker;
     }
@@ -928,19 +863,17 @@ namespace semantic_bki {
                     break;
                 }
             }
-            if (has_invalid) continue;
-            for (size_t i = 0; i < tree.coords.size(); ++i) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x = tree.coords[i].first;
-                p1.y = tree.coords[i].second;
-                p1.z = 0.0;
-                size_t next_idx = (i + 1) % tree.coords.size();
-                p2.x = tree.coords[next_idx].first;
-                p2.y = tree.coords[next_idx].second;
-                p2.z = 0.0;
-                marker.points.push_back(p1);
-                marker.points.push_back(p2);
+            for (const auto& hole : tree.holes) {
+                for (const auto& coord : hole.coords) {
+                    if (std::isnan(coord.first) || std::isnan(coord.second) || std::isinf(coord.first) || std::isinf(coord.second)) {
+                        has_invalid = true;
+                        break;
+                    }
+                }
+                if (has_invalid) break;
             }
+            if (has_invalid) continue;
+            addPolygonOutlineToMarker(tree, marker);
         }
         return marker;
     }
@@ -1182,6 +1115,11 @@ namespace semantic_bki {
             for (auto& coord : building.coords) {
                 transformPoint(coord.first, coord.second);
             }
+            for (auto& hole : building.holes) {
+                for (auto& coord : hole.coords) {
+                    transformPoint(coord.first, coord.second);
+                }
+            }
         }
         
         // Transform roads
@@ -1201,6 +1139,11 @@ namespace semantic_bki {
             for (auto& coord : park.coords) {
                 transformPoint(coord.first, coord.second);
             }
+            for (auto& hole : park.holes) {
+                for (auto& coord : hole.coords) {
+                    transformPoint(coord.first, coord.second);
+                }
+            }
         }
         for (auto& fence : fences_) {
             for (auto& coord : fence.coords) {
@@ -1213,20 +1156,35 @@ namespace semantic_bki {
             }
         }
         
-        // Transform grasslands and trees
+        // Transform grasslands, trees, forests
         for (auto& grassland : grasslands_) {
             for (auto& coord : grassland.coords) {
                 transformPoint(coord.first, coord.second);
+            }
+            for (auto& hole : grassland.holes) {
+                for (auto& coord : hole.coords) {
+                    transformPoint(coord.first, coord.second);
+                }
             }
         }
         for (auto& tree : trees_) {
             for (auto& coord : tree.coords) {
                 transformPoint(coord.first, coord.second);
             }
+            for (auto& hole : tree.holes) {
+                for (auto& coord : hole.coords) {
+                    transformPoint(coord.first, coord.second);
+                }
+            }
         }
         for (auto& forest : forests_) {
             for (auto& coord : forest.coords) {
                 transformPoint(coord.first, coord.second);
+            }
+            for (auto& hole : forest.holes) {
+                for (auto& coord : hole.coords) {
+                    transformPoint(coord.first, coord.second);
+                }
             }
         }
         for (auto& pt : tree_points_) {
@@ -1245,6 +1203,14 @@ namespace semantic_bki {
                     max_x_after = std::max(max_x_after, coord.first);
                     min_y_after = std::min(min_y_after, coord.second);
                     max_y_after = std::max(max_y_after, coord.second);
+                }
+                for (const auto& hole : building.holes) {
+                    for (const auto& coord : hole.coords) {
+                        min_x_after = std::min(min_x_after, coord.first);
+                        max_x_after = std::max(max_x_after, coord.first);
+                        min_y_after = std::min(min_y_after, coord.second);
+                        max_y_after = std::max(max_y_after, coord.second);
+                    }
                 }
             }
             for (const auto& road : roads_) {
@@ -1270,6 +1236,14 @@ namespace semantic_bki {
                     min_y_after = std::min(min_y_after, coord.second);
                     max_y_after = std::max(max_y_after, coord.second);
                 }
+                for (const auto& hole : p.holes) {
+                    for (const auto& coord : hole.coords) {
+                        min_x_after = std::min(min_x_after, coord.first);
+                        max_x_after = std::max(max_x_after, coord.first);
+                        min_y_after = std::min(min_y_after, coord.second);
+                        max_y_after = std::max(max_y_after, coord.second);
+                    }
+                }
             }
             for (const auto& f : fences_) {
                 for (const auto& coord : f.coords) {
@@ -1294,6 +1268,14 @@ namespace semantic_bki {
                     min_y_after = std::min(min_y_after, coord.second);
                     max_y_after = std::max(max_y_after, coord.second);
                 }
+                for (const auto& hole : g.holes) {
+                    for (const auto& coord : hole.coords) {
+                        min_x_after = std::min(min_x_after, coord.first);
+                        max_x_after = std::max(max_x_after, coord.first);
+                        min_y_after = std::min(min_y_after, coord.second);
+                        max_y_after = std::max(max_y_after, coord.second);
+                    }
+                }
             }
             for (const auto& t : trees_) {
                 for (const auto& coord : t.coords) {
@@ -1301,6 +1283,14 @@ namespace semantic_bki {
                     max_x_after = std::max(max_x_after, coord.first);
                     min_y_after = std::min(min_y_after, coord.second);
                     max_y_after = std::max(max_y_after, coord.second);
+                }
+                for (const auto& hole : t.holes) {
+                    for (const auto& coord : hole.coords) {
+                        min_x_after = std::min(min_x_after, coord.first);
+                        max_x_after = std::max(max_x_after, coord.first);
+                        min_y_after = std::min(min_y_after, coord.second);
+                        max_y_after = std::max(max_y_after, coord.second);
+                    }
                 }
             }
             for (const auto& f : forests_) {
@@ -1310,6 +1300,14 @@ namespace semantic_bki {
                     min_y_after = std::min(min_y_after, coord.second);
                     max_y_after = std::max(max_y_after, coord.second);
                 }
+                for (const auto& hole : f.holes) {
+                    for (const auto& coord : hole.coords) {
+                        min_x_after = std::min(min_x_after, coord.first);
+                        max_x_after = std::max(max_x_after, coord.first);
+                        min_y_after = std::min(min_y_after, coord.second);
+                        max_y_after = std::max(max_y_after, coord.second);
+                    }
+                }
             }
             // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries AFTER transform - Bounds: [" << min_x_after << ", " << min_y_after << "] to [" << max_x_after << ", " << max_y_after << "]");
         }
@@ -1317,319 +1315,6 @@ namespace semantic_bki {
         transformed_ = true;
         
         // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries (buildings, roads, grasslands, trees) transformed to first pose origin frame.");
-    }
-
-    bool OSMVisualizer::saveAsPNG(const std::string& output_path, int image_width, int image_height, int margin_pixels) {
-        if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && forests_.empty() && tree_points_.empty()) {
-            // RCLCPP_WARN(node_->get_logger(), "No buildings, roads, grasslands, trees, tree points, or path to render in PNG");
-            return false;
-        }
-
-        // Find bounding box of all buildings and roads
-        float min_x = std::numeric_limits<float>::max();
-        float max_x = std::numeric_limits<float>::lowest();
-        float min_y = std::numeric_limits<float>::max();
-        float max_y = std::numeric_limits<float>::lowest();
-
-        for (const auto& building : buildings_) {
-            for (const auto& coord : building.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        
-        for (const auto& road : roads_) {
-            for (const auto& coord : road.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        for (const auto& sw : sidewalks_) {
-            for (const auto& coord : sw.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        for (const auto& p : parking_) {
-            for (const auto& coord : p.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        for (const auto& f : fences_) {
-            for (const auto& coord : f.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        const float sw = stairs_width_meters_ * 0.5f;
-        for (const auto& st : stairs_) {
-            for (const auto& coord : st.coords) {
-                min_x = std::min(min_x, coord.first - sw);
-                max_x = std::max(max_x, coord.first + sw);
-                min_y = std::min(min_y, coord.second - sw);
-                max_y = std::max(max_y, coord.second + sw);
-            }
-        }
-        for (const auto& g : grasslands_) {
-            for (const auto& coord : g.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        for (const auto& t : trees_) {
-            for (const auto& coord : t.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        for (const auto& f : forests_) {
-            for (const auto& coord : f.coords) {
-                min_x = std::min(min_x, coord.first);
-                max_x = std::max(max_x, coord.first);
-                min_y = std::min(min_y, coord.second);
-                max_y = std::max(max_y, coord.second);
-            }
-        }
-        const float tr = tree_point_radius_meters_;
-        for (const auto& pt : tree_points_) {
-            min_x = std::min(min_x, pt.first - tr);
-            max_x = std::max(max_x, pt.first + tr);
-            min_y = std::min(min_y, pt.second - tr);
-            max_y = std::max(max_y, pt.second + tr);
-        }
-        if (min_x >= max_x || min_y >= max_y) {
-            RCLCPP_ERROR(node_->get_logger(), "Invalid bounding box for OSM geometries");
-            return false;
-        }
-
-        // Calculate scale and offset to fit all geometries in image
-        float range_x = max_x - min_x;
-        float range_y = max_y - min_y;
-        float scale = std::min(
-            (image_width - 2 * margin_pixels) / range_x,
-            (image_height - 2 * margin_pixels) / range_y
-        );
-
-        float offset_x = margin_pixels - min_x * scale;
-        float offset_y = margin_pixels - min_y * scale;
-
-        // Create white background image
-        cv::Mat image = cv::Mat::ones(image_height, image_width, CV_8UC3) * 255;
-
-        // Draw grasslands (light green outlines)
-        cv::Scalar grassland_color(90, 217, 90); // BGR light green
-        for (const auto& grassland : grasslands_) {
-            if (grassland.coords.size() < 3) continue;
-            std::vector<cv::Point> points;
-            for (const auto& coord : grassland.coords) {
-                int px = static_cast<int>(coord.first * scale + offset_x);
-                int py = static_cast<int>(coord.second * scale + offset_y);
-                py = image_height - py;
-                points.push_back(cv::Point(px, py));
-            }
-            for (size_t i = 0; i < points.size(); ++i) {
-                size_t next_i = (i + 1) % points.size();
-                cv::line(image, points[i], points[next_i], grassland_color, 2);
-            }
-        }
-
-        // Draw trees (dark green outlines)
-        cv::Scalar tree_color(51, 128, 26); // BGR dark green
-        for (const auto& tree : trees_) {
-            if (tree.coords.size() < 3) continue;
-            std::vector<cv::Point> points;
-            for (const auto& coord : tree.coords) {
-                int px = static_cast<int>(coord.first * scale + offset_x);
-                int py = static_cast<int>(coord.second * scale + offset_y);
-                py = image_height - py;
-                points.push_back(cv::Point(px, py));
-            }
-            for (size_t i = 0; i < points.size(); ++i) {
-                size_t next_i = (i + 1) % points.size();
-                cv::line(image, points[i], points[next_i], tree_color, 2);
-            }
-        }
-        // Draw forests (darker green outlines)
-        cv::Scalar forest_color(26, 77, 13); // BGR darker green
-        for (const auto& forest : forests_) {
-            if (forest.coords.size() < 3) continue;
-            std::vector<cv::Point> points;
-            for (const auto& coord : forest.coords) {
-                int px = static_cast<int>(coord.first * scale + offset_x);
-                int py = static_cast<int>(coord.second * scale + offset_y);
-                py = image_height - py;
-                points.push_back(cv::Point(px, py));
-            }
-            for (size_t i = 0; i < points.size(); ++i) {
-                size_t next_i = (i + 1) % points.size();
-                cv::line(image, points[i], points[next_i], forest_color, 2);
-            }
-        }
-        // Draw single-point trees (natural=tree nodes) as small circles
-        const int tree_circle_radius_px = std::max(2, static_cast<int>(tree_point_radius_meters_ * scale));
-        for (const auto& pt : tree_points_) {
-            if (std::isnan(pt.first) || std::isnan(pt.second)) continue;
-            int cx = static_cast<int>(pt.first * scale + offset_x);
-            int cy = static_cast<int>(pt.second * scale + offset_y);
-            cy = image_height - cy;
-            cv::circle(image, cv::Point(cx, cy), tree_circle_radius_px, tree_color, 2);  // 2D circle outline
-        }
-
-        // Draw roads (red)
-        cv::Scalar road_color(0, 0, 255); // Red color (BGR format)
-        for (const auto& road : roads_) {
-            if (road.coords.size() < 2) continue;
-            for (size_t i = 0; i < road.coords.size() - 1; ++i) {
-                int px1 = static_cast<int>(road.coords[i].first * scale + offset_x);
-                int py1 = static_cast<int>(road.coords[i].second * scale + offset_y);
-                py1 = image_height - py1;
-                int px2 = static_cast<int>(road.coords[i + 1].first * scale + offset_x);
-                int py2 = static_cast<int>(road.coords[i + 1].second * scale + offset_y);
-                py2 = image_height - py2;
-                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), road_color, 2);
-            }
-        }
-
-        // Draw sidewalks (cyan)
-        cv::Scalar sidewalk_color(255, 255, 0); // Cyan (BGR)
-        for (const auto& sidewalk : sidewalks_) {
-            if (sidewalk.coords.size() < 2) continue;
-            for (size_t i = 0; i < sidewalk.coords.size(); ++i) {
-                size_t next_i = (i + 1) % sidewalk.coords.size();
-                int px1 = static_cast<int>(sidewalk.coords[i].first * scale + offset_x);
-                int py1 = static_cast<int>(sidewalk.coords[i].second * scale + offset_y);
-                py1 = image_height - py1;
-                int px2 = static_cast<int>(sidewalk.coords[next_i].first * scale + offset_x);
-                int py2 = static_cast<int>(sidewalk.coords[next_i].second * scale + offset_y);
-                py2 = image_height - py2;
-                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), sidewalk_color, 1);
-            }
-        }
-
-        // Draw parking (orange)
-        cv::Scalar parking_color(0, 165, 255); // Orange (BGR)
-        for (const auto& park : parking_) {
-            if (park.coords.size() < 2) continue;
-            for (size_t i = 0; i < park.coords.size(); ++i) {
-                size_t next_i = (i + 1) % park.coords.size();
-                int px1 = static_cast<int>(park.coords[i].first * scale + offset_x);
-                int py1 = static_cast<int>(park.coords[i].second * scale + offset_y);
-                py1 = image_height - py1;
-                int px2 = static_cast<int>(park.coords[next_i].first * scale + offset_x);
-                int py2 = static_cast<int>(park.coords[next_i].second * scale + offset_y);
-                py2 = image_height - py2;
-                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), parking_color, 2);
-            }
-        }
-
-        // Draw fences (barrier=fence)
-        cv::Scalar fence_color(102, 115, 128);  // Gray/brown (BGR)
-        for (const auto& fence : fences_) {
-            if (fence.coords.size() < 2) continue;
-            for (size_t i = 0; i < fence.coords.size() - 1; ++i) {
-                int px1 = static_cast<int>(fence.coords[i].first * scale + offset_x);
-                int py1 = static_cast<int>(fence.coords[i].second * scale + offset_y);
-                py1 = image_height - py1;
-                int px2 = static_cast<int>(fence.coords[i + 1].first * scale + offset_x);
-                int py2 = static_cast<int>(fence.coords[i + 1].second * scale + offset_y);
-                py2 = image_height - py2;
-                cv::line(image, cv::Point(px1, py1), cv::Point(px2, py2), fence_color, 1);
-            }
-        }
-
-        // Draw stairs (highway=steps) as rectangles enclosing each segment
-        cv::Scalar stairs_color(51, 102, 153);  // Brown/tan (BGR)
-        const float hw_stairs = stairs_width_meters_ * 0.5f;
-        const float eps_stairs = 1e-6f;
-        for (const auto& stair : stairs_) {
-            if (stair.coords.size() < 2) continue;
-            for (size_t i = 0; i < stair.coords.size() - 1; ++i) {
-                float x1 = stair.coords[i].first, y1 = stair.coords[i].second;
-                float x2 = stair.coords[i + 1].first, y2 = stair.coords[i + 1].second;
-                float dx = x2 - x1, dy = y2 - y1;
-                float L = std::sqrt(dx * dx + dy * dy);
-                if (L < eps_stairs) continue;
-                float nx = -dy / L, ny = dx / L;
-                float c1x = x1 + hw_stairs * nx, c1y = y1 + hw_stairs * ny;
-                float c2x = x1 - hw_stairs * nx, c2y = y1 - hw_stairs * ny;
-                float c3x = x2 - hw_stairs * nx, c3y = y2 - hw_stairs * ny;
-                float c4x = x2 + hw_stairs * nx, c4y = y2 + hw_stairs * ny;
-                auto toPt = [&](float x, float y) {
-                    int px = static_cast<int>(x * scale + offset_x);
-                    int py = image_height - static_cast<int>(y * scale + offset_y);
-                    return cv::Point(px, py);
-                };
-                std::vector<cv::Point> rect = { toPt(c1x, c1y), toPt(c2x, c2y), toPt(c3x, c3y), toPt(c4x, c4y) };
-                for (size_t j = 0; j < 4; ++j) {
-                    cv::line(image, rect[j], rect[(j + 1) % 4], stairs_color, 2);
-                }
-            }
-        }
-
-        // Draw buildings
-        cv::Scalar building_color(77, 77, 204); // Blue color (BGR format)
-        cv::Scalar building_outline(0, 0, 255); // Red outline for visibility
-
-        for (const auto& building : buildings_) {
-            if (building.coords.size() < 3) continue;
-
-            // Convert building coordinates to image coordinates
-            std::vector<cv::Point> points;
-            for (const auto& coord : building.coords) {
-                int px = static_cast<int>(coord.first * scale + offset_x);
-                int py = static_cast<int>(coord.second * scale + offset_y);
-                // Flip Y axis (image coordinates have origin at top-left)
-                py = image_height - py;
-                points.push_back(cv::Point(px, py));
-            }
-
-            // Fill polygon
-            if (points.size() >= 3) {
-                const cv::Point* pts = &points[0];
-                int npts = static_cast<int>(points.size());
-                cv::fillPoly(image, &pts, &npts, 1, building_color);
-
-                // Draw outline
-                for (size_t i = 0; i < points.size(); ++i) {
-                    size_t next_i = (i + 1) % points.size();
-                    cv::line(image, points[i], points[next_i], building_outline, 2);
-                }
-            }
-        }
-
-        // Add coordinate info as text
-        std::stringstream info;
-        info << "B:" << buildings_.size() << " R:" << roads_.size() << " SW:" << sidewalks_.size() << " PK:" << parking_.size() << " F:" << fences_.size() << " ST:" << stairs_.size() << " G:" << grasslands_.size() << " T:" << trees_.size() << " TP:" << tree_points_.size() << " | ";
-        info << "Bounds: [" << min_x << ", " << min_y << "] to [" << max_x << ", " << max_y << "]";
-        cv::putText(image, info.str(), cv::Point(10, 30), 
-                   cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 0), 2);
-
-        // Save image
-        bool success = cv::imwrite(output_path, image);
-        if (success) {
-            // RCLCPP_INFO_STREAM(node_->get_logger(), "Saved OSM visualization to: " << output_path);
-            // RCLCPP_INFO_STREAM(node_->get_logger(), "  Image size: " << image_width << "x" << image_height);
-            // RCLCPP_INFO_STREAM(node_->get_logger(), "  Buildings: " << buildings_.size() << ", Roads: " << roads_.size() << ", Grasslands: " << grasslands_.size() << ", Trees: " << trees_.size());
-        } else {
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to save PNG image to: " << output_path);
-        }
-
-        return success;
     }
 
 } // namespace semantic_bki

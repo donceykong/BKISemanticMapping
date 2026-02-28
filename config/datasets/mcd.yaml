@@ -19,7 +19,7 @@
     # Dataset information
     input_data_prefix: kth_day_09/lidar_bin/data
     lidar_pose_file: kth_day_09/pose_inW.csv
-    evaluation_result_prefix: evaluations/osm_height_prior_evaluations/
+    evaluation_result_prefix: evaluations/osm_prior_evaluations/
     query: true
     visualize: true
 

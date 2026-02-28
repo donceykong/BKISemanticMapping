@@ -76,16 +76,6 @@ namespace semantic_bki {
 
         float getStairsWidth() const { return stairs_width_meters_; }
 
-        /**
-         * Save OSM buildings and roads visualization as a PNG image.
-         * @param output_path Path to save the PNG file
-         * @param image_width Width of the output image in pixels (default: 2048)
-         * @param image_height Height of the output image in pixels (default: 2048)
-         * @param margin_pixels Margin around the geometries in pixels (default: 50)
-         * @return true if saved successfully
-         */
-        bool saveAsPNG(const std::string& output_path, int image_width = 2048, int image_height = 2048, int margin_pixels = 50);
-
         /// Return OSM geometries (after transform if applied). Used to set voxel OSM priors.
         const std::vector<Geometry2D>& getBuildings() const { return buildings_; }
         const std::vector<Geometry2D>& getRoads() const { return roads_; }
