@@ -360,6 +360,7 @@ int main(int argc, char **argv) {
         mcd_data.set_osm_roads(osm_vis.getRoads());
         mcd_data.set_osm_grasslands(osm_vis.getGrasslands());
         mcd_data.set_osm_trees(osm_vis.getTrees());
+        mcd_data.set_osm_forests(osm_vis.getForests());
         mcd_data.set_osm_tree_points(osm_vis.getTreePoints());
         mcd_data.set_osm_parking(osm_vis.getParking());
         mcd_data.set_osm_fences(osm_vis.getFences());
@@ -373,6 +374,7 @@ int main(int argc, char **argv) {
             << osm_vis.getStairs().size() << " stairs, "
             << osm_vis.getGrasslands().size() << " grasslands, "
             << osm_vis.getTrees().size() << " tree polygons, "
+            << osm_vis.getForests().size() << " forest polygons, "
             << osm_vis.getTreePoints().size() << " tree points (decay=" << osm_decay_meters << " m)");
       } else {
         RCLCPP_WARN_STREAM(node->get_logger(), "Failed to load OSM file for priors: " << full_osm_path);

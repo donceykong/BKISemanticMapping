@@ -254,6 +254,10 @@ namespace semantic_bki {
         osm_trees_ = trees;
     }
 
+    void SemanticBKIOctoMap::set_osm_forests(const std::vector<Geometry2D> &forests) {
+        osm_forests_ = forests;
+    }
+
     void SemanticBKIOctoMap::set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points) {
         osm_tree_points_ = tree_points;
     }
@@ -310,7 +314,7 @@ namespace semantic_bki {
     }
 
     void SemanticBKIOctoMap::compute_osm_height_stats_from_cloud(const PCLPointCloud &cloud) {
-        static constexpr int N_CAT = 7;  // roads, parking, grasslands, trees, buildings, fences, stairs
+        static constexpr int N_CAT = 8;  // roads, parking, grasslands, trees, forest, buildings, fences, stairs
         std::vector<std::vector<float>> z_per_cat(N_CAT);
         const float threshold = 0.3f;
 
@@ -349,14 +353,15 @@ namespace semantic_bki {
         osm_vec[1] = compute_osm_parking_prior(x, y);
         osm_vec[2] = compute_osm_grassland_prior(x, y);
         osm_vec[3] = compute_osm_tree_prior(x, y);
-        osm_vec[4] = compute_osm_building_prior(x, y);
-        osm_vec[5] = compute_osm_fence_prior(x, y);
-        osm_vec[6] = compute_osm_stairs_prior(x, y);
+        osm_vec[4] = compute_osm_forest_prior(x, y);
+        osm_vec[5] = compute_osm_building_prior(x, y);
+        osm_vec[6] = compute_osm_fence_prior(x, y);
+        osm_vec[7] = compute_osm_stairs_prior(x, y);
         // "none" = 1 when no OSM geometry covers this point, 0 when fully covered
         float max_geom = 0.f;
-        for (int c = 0; c < 7; ++c)
+        for (int c = 0; c < 8; ++c)
             if (osm_vec[c] > max_geom) max_geom = osm_vec[c];
-        osm_vec[7] = 1.0f - max_geom;
+        osm_vec[8] = 1.0f - max_geom;
     }
 
     void SemanticBKIOctoMap::apply_osm_prior_to_ybars(std::vector<float> &ybars,
@@ -367,7 +372,7 @@ namespace semantic_bki {
         compute_osm_prior_vec(x, y, osm_vec);
 
         if (use_osm_height_filter_) {
-            for (int c = 0; c < 7; ++c) {
+            for (int c = 0; c < 8; ++c) {
                 if (!osm_height_valid_[c]) continue;
                 float mean = osm_height_mean_[c];
                 float stdv = osm_height_std_[c];
@@ -428,6 +433,17 @@ namespace semantic_bki {
         for (const auto &poly : osm_grasslands_) {
             float signed_d = distance_to_polygon_boundary(x, y, poly);
             if (signed_d <= 0.f) return 1.f;  // inside grassland
+            if (signed_d < min_positive_d) min_positive_d = signed_d;
+        }
+        return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);
+    }
+
+    float SemanticBKIOctoMap::compute_osm_forest_prior(float x, float y) const {
+        if (osm_forests_.empty()) return 0.f;
+        float min_positive_d = std::numeric_limits<float>::max();
+        for (const auto &poly : osm_forests_) {
+            float signed_d = distance_to_polygon_boundary(x, y, poly);
+            if (signed_d <= 0.f) return 1.f;  // inside forest
             if (signed_d < min_positive_d) min_positive_d = signed_d;
         }
         return osm_prior_from_signed_distance(min_positive_d, osm_decay_meters_);

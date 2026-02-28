@@ -341,6 +341,7 @@ namespace semantic_bki {
         void set_osm_roads(const std::vector<Geometry2D> &roads);
         void set_osm_grasslands(const std::vector<Geometry2D> &grasslands);
         void set_osm_trees(const std::vector<Geometry2D> &trees);
+        void set_osm_forests(const std::vector<Geometry2D> &forests);
         void set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points);
         void set_osm_tree_point_radius(float radius_m);
         void set_osm_parking(const std::vector<Geometry2D> &parking);
@@ -366,7 +367,7 @@ namespace semantic_bki {
         void set_osm_height_std_multiplier(float k);  // e.g. 2.0 for mean ± 2*std
 
     private:
-        static constexpr int N_OSM_PRIOR_COLS = 8;
+        static constexpr int N_OSM_PRIOR_COLS = 9;  // roads, parking, grasslands, trees, forest, buildings, fences, stairs, none
 
         void compute_osm_prior_vec(float x, float y, float osm_vec[N_OSM_PRIOR_COLS]) const;
 
@@ -379,6 +380,7 @@ namespace semantic_bki {
         float compute_osm_road_prior(float x, float y) const;
         float compute_osm_grassland_prior(float x, float y) const;
         float compute_osm_tree_prior(float x, float y) const;
+        float compute_osm_forest_prior(float x, float y) const;
         float compute_osm_parking_prior(float x, float y) const;
         float compute_osm_fence_prior(float x, float y) const;
         float compute_osm_stairs_prior(float x, float y) const;
@@ -448,6 +450,7 @@ namespace semantic_bki {
         std::vector<Geometry2D> osm_roads_;
         std::vector<Geometry2D> osm_grasslands_;
         std::vector<Geometry2D> osm_trees_;
+        std::vector<Geometry2D> osm_forests_;
         std::vector<std::pair<float, float>> osm_tree_points_;
         float osm_tree_point_radius_{5.0f};  // Radius (m) for tree point circles; prior projected same as polygons
         std::vector<Geometry2D> osm_parking_;
@@ -467,9 +470,9 @@ namespace semantic_bki {
         // OSM height filter: scale priors by z within mean ± k*std per OSM category
         bool use_osm_height_filter_{false};
         float osm_height_std_multiplier_{2.0f};
-        float osm_height_mean_[7]{};   // roads, parking, grasslands, trees, buildings, fences, stairs
-        float osm_height_std_[7]{};    // std per category; 0 = no valid stats
-        bool osm_height_valid_[7]{};   // true if category has enough points
+        float osm_height_mean_[8]{};   // roads, parking, grasslands, trees, forest, buildings, fences, stairs
+        float osm_height_std_[8]{};    // std per category; 0 = no valid stats
+        bool osm_height_valid_[8]{};   // true if category has enough points
     };
 
 }

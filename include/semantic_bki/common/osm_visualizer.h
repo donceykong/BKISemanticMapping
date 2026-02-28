@@ -95,6 +95,7 @@ namespace semantic_bki {
         const std::vector<Geometry2D>& getStairs() const { return stairs_; }
         const std::vector<Geometry2D>& getGrasslands() const { return grasslands_; }
         const std::vector<Geometry2D>& getTrees() const { return trees_; }
+        const std::vector<Geometry2D>& getForests() const { return forests_; }
         const std::vector<std::pair<float, float>>& getTreePoints() const { return tree_points_; }
 
     private:
@@ -144,9 +145,14 @@ namespace semantic_bki {
         visualization_msgs::msg::Marker createGrasslandMarker(const std::vector<Geometry2D>& grasslands);
 
         /**
-         * Create Marker message for trees/forest (dark green polygon outlines).
+         * Create Marker message for trees (landcover=trees, orchard, vineyard).
          */
         visualization_msgs::msg::Marker createTreeMarker(const std::vector<Geometry2D>& trees);
+
+        /**
+         * Create Marker message for forests (landuse=forest, natural=forest/wood).
+         */
+        visualization_msgs::msg::Marker createForestMarker(const std::vector<Geometry2D>& forests);
 
         /**
          * Create Marker message for tree points (single-node trees as 2D circle outlines).
@@ -166,7 +172,8 @@ namespace semantic_bki {
         std::vector<Geometry2D> fences_;
         std::vector<Geometry2D> stairs_;
         std::vector<Geometry2D> grasslands_;
-        std::vector<Geometry2D> trees_;           // Forest/wood polygons
+        std::vector<Geometry2D> trees_;           // landcover=trees, orchard, vineyard
+        std::vector<Geometry2D> forests_;         // landuse=forest, natural=forest/wood
         std::vector<std::pair<float, float>> tree_points_;  // Single-point trees (natural=tree nodes)
         std::vector<std::pair<float, float>> path_;  // Lidar trajectory for debugging
         float tree_point_radius_meters_{5.0f};  // Radius for tree point circles (visualization and prior)

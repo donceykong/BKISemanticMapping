@@ -460,6 +460,9 @@ class MCDData {
     void set_osm_trees(const std::vector<semantic_bki::Geometry2D> &trees) {
       if (map_) map_->set_osm_trees(trees);
     }
+    void set_osm_forests(const std::vector<semantic_bki::Geometry2D> &forests) {
+      if (map_) map_->set_osm_forests(forests);
+    }
     void set_osm_tree_points(const std::vector<std::pair<float, float>> &tree_points) {
       if (map_) map_->set_osm_tree_points(tree_points);
     }
@@ -510,8 +513,8 @@ class MCDData {
         int n_rows = max_row + 1;
 
         // Parse confusion matrix rows (keyed by common class ID)
-        // 8 columns: [roads, parking, grasslands, trees, buildings, fences, stairs, none]
-        static constexpr int N_OSM_COLS = 8;
+        // 9 columns: [roads, parking, grasslands, trees, forest, buildings, fences, stairs, none]
+        static constexpr int N_OSM_COLS = 9;
         std::vector<std::vector<float>> matrix(n_rows, std::vector<float>(N_OSM_COLS, 0.f));
         for (auto it = cm_node.begin(); it != cm_node.end(); ++it) {
           int common_class = it->first.as<int>();

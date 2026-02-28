@@ -24,7 +24,7 @@
 #include <osmium/tags/tags_filter.hpp>
 
 namespace {
-    // Handler class for extracting buildings, roads, sidewalks, grasslands, trees (ways + nodes + multipolygons) from OSM data using libosmium
+    // Handler class for extracting buildings, roads, sidewalks, grasslands, trees, forests (ways + nodes + multipolygons) from OSM data using libosmium
     class OSMGeometryHandler : public osmium::handler::Handler {
     public:
         static constexpr double EARTH_RADIUS_M = 6378137.0;
@@ -38,10 +38,11 @@ namespace {
                           std::vector<semantic_bki::Geometry2D>& stairs,
                           std::vector<semantic_bki::Geometry2D>& grasslands,
                           std::vector<semantic_bki::Geometry2D>& trees,
+                          std::vector<semantic_bki::Geometry2D>& forests,
                           std::vector<std::pair<float, float>>& tree_points)
             : origin_lat_(origin_lat), origin_lon_(origin_lon),
               buildings_(buildings), roads_(roads), sidewalks_(sidewalks), parking_(parking), fences_(fences), stairs_(stairs),
-              grasslands_(grasslands), trees_(trees), tree_points_(tree_points) {
+              grasslands_(grasslands), trees_(trees), forests_(forests), tree_points_(tree_points) {
             scale_ = std::cos(origin_lat * M_PI / 180.0);
             double origin_lon_rad = origin_lon * M_PI / 180.0;
             double origin_lat_rad = origin_lat * M_PI / 180.0;
@@ -173,15 +174,22 @@ namespace {
                     }
                     return;
                 }
-                // Trees/forest: natural=wood, or landuse=forest
+                // Forest: natural=wood, natural=forest (larger wooded areas)
                 if (natural == "wood" || natural == "forest") {
                     if (geom.coords.size() >= 3) {
-                        trees_.push_back(geom);
+                        forests_.push_back(geom);
                     }
                     return;
                 }
             }
             if (landuse_tag && std::string(landuse_tag) == "forest") {
+                if (geom.coords.size() >= 3) {
+                    forests_.push_back(geom);
+                }
+            }
+            // landcover=trees (tree-covered areas)
+            const char* landcover_tag = way.tags()["landcover"];
+            if (landcover_tag && std::string(landcover_tag) == "trees") {
                 if (geom.coords.size() >= 3) {
                     trees_.push_back(geom);
                 }
@@ -225,11 +233,63 @@ namespace {
                 return;
             }
 
-            // Check for grassland/meadow areas
+            // Check for grassland/meadow/recreation areas (multipolygons)
             const char* landuse_tag = area.tags()["landuse"];
             if (landuse_tag) {
                 std::string landuse(landuse_tag);
-                if (landuse == "grass" || landuse == "meadow" || landuse == "greenfield") {
+                if (landuse == "grass" || landuse == "meadow" || landuse == "greenfield" ||
+                    landuse == "recreation_ground") {
+                    for (const auto& outer_ring : area.outer_rings()) {
+                        semantic_bki::Geometry2D geom;
+                        for (const auto& node_ref : outer_ring) {
+                            const osmium::Location& location = node_ref.location();
+                            if (location.valid()) {
+                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
+                            }
+                        }
+                        if (geom.coords.size() >= 3) {
+                            grasslands_.push_back(geom);
+                        }
+                    }
+                    return;
+                }
+                if (landuse == "orchard" || landuse == "vineyard") {
+                    for (const auto& outer_ring : area.outer_rings()) {
+                        semantic_bki::Geometry2D geom;
+                        for (const auto& node_ref : outer_ring) {
+                            const osmium::Location& location = node_ref.location();
+                            if (location.valid()) {
+                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
+                            }
+                        }
+                        if (geom.coords.size() >= 3) {
+                            trees_.push_back(geom);
+                        }
+                    }
+                    return;
+                }
+                if (landuse == "forest") {
+                    for (const auto& outer_ring : area.outer_rings()) {
+                        semantic_bki::Geometry2D geom;
+                        for (const auto& node_ref : outer_ring) {
+                            const osmium::Location& location = node_ref.location();
+                            if (location.valid()) {
+                                geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
+                            }
+                        }
+                        if (geom.coords.size() >= 3) {
+                            forests_.push_back(geom);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Check for leisure=park, leisure=garden (multipolygons) -> grasslands
+            const char* leisure_tag = area.tags()["leisure"];
+            if (leisure_tag) {
+                std::string leisure(leisure_tag);
+                if (leisure == "park" || leisure == "garden") {
                     for (const auto& outer_ring : area.outer_rings()) {
                         semantic_bki::Geometry2D geom;
                         for (const auto& node_ref : outer_ring) {
@@ -246,7 +306,7 @@ namespace {
                 }
             }
 
-            // Check for forest/wood areas
+            // Check for forest/wood areas (multipolygons) -> forests_
             const char* natural_tag = area.tags()["natural"];
             if (natural_tag) {
                 std::string natural(natural_tag);
@@ -260,13 +320,30 @@ namespace {
                             }
                         }
                         if (geom.coords.size() >= 3) {
-                            trees_.push_back(geom);
+                            forests_.push_back(geom);
                         }
                     }
                     return;
                 }
             }
             if (landuse_tag && std::string(landuse_tag) == "forest") {
+                for (const auto& outer_ring : area.outer_rings()) {
+                    semantic_bki::Geometry2D geom;
+                    for (const auto& node_ref : outer_ring) {
+                        const osmium::Location& location = node_ref.location();
+                        if (location.valid()) {
+                            geom.coords.push_back(latlon_to_xy(location.lat(), location.lon()));
+                        }
+                    }
+                    if (geom.coords.size() >= 3) {
+                        forests_.push_back(geom);
+                    }
+                }
+                return;
+            }
+            // landcover=trees (tree-covered areas, multipolygons) -> trees_
+            const char* landcover_tag = area.tags()["landcover"];
+            if (landcover_tag && std::string(landcover_tag) == "trees") {
                 for (const auto& outer_ring : area.outer_rings()) {
                     semantic_bki::Geometry2D geom;
                     for (const auto& node_ref : outer_ring) {
@@ -293,6 +370,7 @@ namespace {
         std::vector<semantic_bki::Geometry2D>& stairs_;
         std::vector<semantic_bki::Geometry2D>& grasslands_;
         std::vector<semantic_bki::Geometry2D>& trees_;
+        std::vector<semantic_bki::Geometry2D>& forests_;
         std::vector<std::pair<float, float>>& tree_points_;
     };
 }
@@ -336,6 +414,7 @@ namespace semantic_bki {
         stairs_.clear();
         grasslands_.clear();
         trees_.clear();
+        forests_.clear();
         tree_points_.clear();
         
         // RCLCPP_INFO_STREAM(node_->get_logger(), "OSMVisualizer::loadFromOSM called with file: " << osm_file);
@@ -351,23 +430,29 @@ namespace semantic_bki {
             osmium::handler::NodeLocationsForWays<osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>> 
                 location_handler(index);
             
-            // Create handler to extract buildings, roads, sidewalks, grasslands, trees (ways + point trees + multipolygons)
-            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_, sidewalks_, parking_, fences_, stairs_, grasslands_, trees_, tree_points_);
+            // Create handler to extract buildings, roads, sidewalks, grasslands, trees, forests (ways + point trees + multipolygons)
+            OSMGeometryHandler handler(origin_lat, origin_lon, buildings_, roads_, sidewalks_, parking_, fences_, stairs_, grasslands_, trees_, forests_, tree_points_);
             
-            // MultipolygonManager to convert multipolygon relations to areas
-            // Configure assembler and filter for multipolygons (buildings, landuse, natural)
+            // MultipolygonManager to convert multipolygon relations (type=multipolygon) to areas
+            // Filter: which relations to assemble. Each rule accepts relations with matching tags.
             osmium::area::AssemblerConfig assembler_config;
             osmium::TagsFilter filter(false);  // Start with false (reject all)
-            filter.add_rule(true, "building");  // Accept buildings
+            filter.add_rule(true, "building");  // Buildings (simple and multipolygon)
             filter.add_rule(true, "landuse", "grass");
             filter.add_rule(true, "landuse", "meadow");
             filter.add_rule(true, "landuse", "greenfield");
             filter.add_rule(true, "landuse", "forest");
+            filter.add_rule(true, "landuse", "recreation_ground");
+            filter.add_rule(true, "landuse", "orchard");
+            filter.add_rule(true, "landuse", "vineyard");
             filter.add_rule(true, "natural", "grassland");
             filter.add_rule(true, "natural", "heath");
             filter.add_rule(true, "natural", "scrub");
             filter.add_rule(true, "natural", "wood");
             filter.add_rule(true, "natural", "forest");
+            filter.add_rule(true, "landcover", "trees");  // Tree-covered areas (OSM tag)
+            filter.add_rule(true, "leisure", "park");
+            filter.add_rule(true, "leisure", "garden");
             filter.add_rule(true, "amenity", "parking");
             using MultipolygonManager = osmium::area::MultipolygonManager<osmium::area::Assembler>;
             MultipolygonManager mp_manager(assembler_config, filter);
@@ -398,7 +483,7 @@ namespace semantic_bki {
             
             // RCLCPP_INFO_STREAM(node_->get_logger(), "Loaded " << buildings_.size() << " buildings, " << roads_.size() << " roads/sidewalks, " << grasslands_.size() << " grasslands, " << trees_.size() << " tree/forest polygons, " << tree_points_.size() << " tree points from OSM file using libosmium");
             
-            if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
+            if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && forests_.empty() && tree_points_.empty()) {
                 // RCLCPP_WARN(node_->get_logger(), "WARNING: No buildings, roads, grasslands, or trees found in OSM file.");
             }
             
@@ -778,6 +863,47 @@ namespace semantic_bki {
         return marker;
     }
 
+    visualization_msgs::msg::Marker OSMVisualizer::createForestMarker(const std::vector<Geometry2D>& forests) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = frame_id_;
+        marker.header.stamp = node_->now();
+        marker.ns = "osm_forests";
+        marker.id = 10;
+        marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.35;
+        marker.color.r = 0.0f;
+        marker.color.g = 0.4f;
+        marker.color.b = 0.1f;
+        marker.color.a = 0.95f;
+
+        for (const auto& forest : forests) {
+            if (forest.coords.size() < 3) continue;
+            bool has_invalid = false;
+            for (const auto& coord : forest.coords) {
+                if (std::isnan(coord.first) || std::isnan(coord.second) || std::isinf(coord.first) || std::isinf(coord.second)) {
+                    has_invalid = true;
+                    break;
+                }
+            }
+            if (has_invalid) continue;
+            for (size_t i = 0; i < forest.coords.size(); ++i) {
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = forest.coords[i].first;
+                p1.y = forest.coords[i].second;
+                p1.z = 0.0;
+                size_t next_idx = (i + 1) % forest.coords.size();
+                p2.x = forest.coords[next_idx].first;
+                p2.y = forest.coords[next_idx].second;
+                p2.z = 0.0;
+                marker.points.push_back(p1);
+                marker.points.push_back(p2);
+            }
+        }
+        return marker;
+    }
+
     visualization_msgs::msg::Marker OSMVisualizer::createTreeMarker(const std::vector<Geometry2D>& trees) {
         visualization_msgs::msg::Marker marker;
         marker.header.frame_id = frame_id_;
@@ -915,7 +1041,10 @@ namespace semantic_bki {
         if (!trees_.empty()) {
             auto marker = createTreeMarker(trees_);
             marker_array.markers.push_back(marker);
-            // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM: Added " << trees_.size() << " trees/forests with " << marker.points.size() << " line points");
+        }
+        if (!forests_.empty()) {
+            auto marker = createForestMarker(forests_);
+            marker_array.markers.push_back(marker);
         }
         if (!tree_points_.empty()) {
             auto marker = createTreePointsMarker();
@@ -924,7 +1053,7 @@ namespace semantic_bki {
         }
         
         if (marker_array.markers.empty()) {
-            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", sidewalks=" << sidewalks_.size() << ", parking=" << parking_.size() << ", fences=" << fences_.size() << ", stairs=" << stairs_.size() << ", grasslands=" << grasslands_.size() << ", trees=" << trees_.size() << ", tree_points=" << tree_points_.size() << ")");
+            // RCLCPP_WARN_STREAM(node_->get_logger(), "OSMVisualizer: No markers to publish! (buildings=" << buildings_.size() << ", roads=" << roads_.size() << ", ... trees=" << trees_.size() << ", forests=" << forests_.size() << ", tree_points=" << tree_points_.size() << ")");
             return;
         }
         
@@ -1095,6 +1224,11 @@ namespace semantic_bki {
                 transformPoint(coord.first, coord.second);
             }
         }
+        for (auto& forest : forests_) {
+            for (auto& coord : forest.coords) {
+                transformPoint(coord.first, coord.second);
+            }
+        }
         for (auto& pt : tree_points_) {
             transformPoint(pt.first, pt.second);
         }
@@ -1169,6 +1303,14 @@ namespace semantic_bki {
                     max_y_after = std::max(max_y_after, coord.second);
                 }
             }
+            for (const auto& f : forests_) {
+                for (const auto& coord : f.coords) {
+                    min_x_after = std::min(min_x_after, coord.first);
+                    max_x_after = std::max(max_x_after, coord.first);
+                    min_y_after = std::min(min_y_after, coord.second);
+                    max_y_after = std::max(max_y_after, coord.second);
+                }
+            }
             // RCLCPP_INFO_STREAM(node_->get_logger(), "OSM geometries AFTER transform - Bounds: [" << min_x_after << ", " << min_y_after << "] to [" << max_x_after << ", " << max_y_after << "]");
         }
         
@@ -1178,7 +1320,7 @@ namespace semantic_bki {
     }
 
     bool OSMVisualizer::saveAsPNG(const std::string& output_path, int image_width, int image_height, int margin_pixels) {
-        if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && tree_points_.empty()) {
+        if (buildings_.empty() && roads_.empty() && sidewalks_.empty() && parking_.empty() && fences_.empty() && stairs_.empty() && grasslands_.empty() && trees_.empty() && forests_.empty() && tree_points_.empty()) {
             // RCLCPP_WARN(node_->get_logger(), "No buildings, roads, grasslands, trees, tree points, or path to render in PNG");
             return false;
         }
@@ -1255,6 +1397,14 @@ namespace semantic_bki {
                 max_y = std::max(max_y, coord.second);
             }
         }
+        for (const auto& f : forests_) {
+            for (const auto& coord : f.coords) {
+                min_x = std::min(min_x, coord.first);
+                max_x = std::max(max_x, coord.first);
+                min_y = std::min(min_y, coord.second);
+                max_y = std::max(max_y, coord.second);
+            }
+        }
         const float tr = tree_point_radius_meters_;
         for (const auto& pt : tree_points_) {
             min_x = std::min(min_x, pt.first - tr);
@@ -1298,7 +1448,7 @@ namespace semantic_bki {
             }
         }
 
-        // Draw trees/forest (dark green outlines)
+        // Draw trees (dark green outlines)
         cv::Scalar tree_color(51, 128, 26); // BGR dark green
         for (const auto& tree : trees_) {
             if (tree.coords.size() < 3) continue;
@@ -1312,6 +1462,22 @@ namespace semantic_bki {
             for (size_t i = 0; i < points.size(); ++i) {
                 size_t next_i = (i + 1) % points.size();
                 cv::line(image, points[i], points[next_i], tree_color, 2);
+            }
+        }
+        // Draw forests (darker green outlines)
+        cv::Scalar forest_color(26, 77, 13); // BGR darker green
+        for (const auto& forest : forests_) {
+            if (forest.coords.size() < 3) continue;
+            std::vector<cv::Point> points;
+            for (const auto& coord : forest.coords) {
+                int px = static_cast<int>(coord.first * scale + offset_x);
+                int py = static_cast<int>(coord.second * scale + offset_y);
+                py = image_height - py;
+                points.push_back(cv::Point(px, py));
+            }
+            for (size_t i = 0; i < points.size(); ++i) {
+                size_t next_i = (i + 1) % points.size();
+                cv::line(image, points[i], points[next_i], forest_color, 2);
             }
         }
         // Draw single-point trees (natural=tree nodes) as small circles
